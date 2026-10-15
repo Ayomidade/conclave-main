@@ -3,6 +3,7 @@ import { useRef, useState } from 'react';
 // edit are the same gesture — a pen writing on a surface. Inventing one asset
 // for a single row would break the set's 90-icon style contract for no gain.
 import IconCompose from '@/assets/icons/compose.svg?react';
+import IconCopy from '@/assets/icons/copy.svg?react';
 import IconDecisions from '@/assets/icons/decisions.svg?react';
 import IconDelete from '@/assets/icons/delete.svg?react';
 import IconMore from '@/assets/icons/more.svg?react';
@@ -30,8 +31,8 @@ import { REACTION_EMOJI } from "@/lib/messageMeta";
  * almost always remembered as "that message in #deployments" — finding it again
  * in a board is the hard part, not writing it down.
  *
- * The menu is a sibling of the message content rather than a wrapper around it,
- * so the row stays selectable and the menu cannot swallow a text selection.
+ * The trigger sits beside the message body without taking layout space; the
+ * popover is portalled so it is not clipped by the scrolling timeline.
  *
  * @param {object} message
  * @param {string} viewerId
@@ -56,6 +57,8 @@ export default function MessageActions({
   isAdmin,
   open,
   onOpenChange,
+  anchorRef,
+  align = "end",
   onToggleReaction,
   onReply,
   onEdit,
@@ -68,6 +71,19 @@ export default function MessageActions({
   const triggerRef = useRef(null);
   const setOpen = (value) =>
     onOpenChange(typeof value === "function" ? value(open) : value);
+
+  // The kebab is hidden on touch, so there the menu anchors to the message.
+  const isTouch =
+    typeof window !== "undefined" && window.matchMedia("(hover: none)").matches;
+  const menuAnchor = isTouch && anchorRef ? anchorRef : triggerRef;
+
+  const copyText = async () => {
+    try {
+      await navigator.clipboard.writeText(message.content);
+    } catch {
+      // Clipboard blocked (plain http, or permission denied). Nothing to do.
+    }
+  };
 
   const isMine = message.sender_id === viewerId;
 
@@ -84,6 +100,12 @@ export default function MessageActions({
 
   const items = [
     { key: "reply", label: "Reply", Icon: IconReply, onClick: onReply },
+    message.content && {
+      key: "copy",
+      label: "Copy text",
+      Icon: IconCopy,
+      onClick: copyText,
+    },
     // Edit is omitted on a poll: its question IS the message content, so
     // editing the text would silently change what the recorded votes answer,
     // and the server rejects it outright with 400.
@@ -159,8 +181,8 @@ export default function MessageActions({
       <PopoverMenu
         open={open}
         onClose={() => setOpen(false)}
-        triggerRef={triggerRef}
-        align="end"
+        triggerRef={menuAnchor}
+        align={align}
         label="Message actions"
         className="w-52"
       >

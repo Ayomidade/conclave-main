@@ -40,6 +40,7 @@ export default function AttachmentPreviewDialog({
   files,
   initialCaption = '',
   sending = false,
+  progress = 0,
   error = '',
   onSend,
   onCancel,
@@ -69,6 +70,7 @@ export default function AttachmentPreviewDialog({
   const index = Math.min(activeIndex, files.length - 1);
   const active = files[index];
   const isImage = (file) => Boolean(file?.type?.startsWith('image/'));
+  const isVideo = (file) => Boolean(file?.type?.startsWith('video/'));
   const Icon = active?.type === 'application/pdf' ? IconDocument
     : active?.type?.startsWith('audio/') ? IconAudio
     : IconFile;
@@ -126,6 +128,14 @@ export default function AttachmentPreviewDialog({
               alt={active.name}
               className="max-h-full max-w-full rounded-lg object-contain"
             />
+          ) : isVideo(active) && urls[index] ? (
+            <video
+              key={urls[index]}
+              src={urls[index]}
+              controls
+              playsInline
+              className="max-h-full max-w-full rounded-lg"
+            />
           ) : (
             <div className="flex max-w-xs flex-col items-center gap-3 text-center">
               <span className="grid h-20 w-20 place-items-center rounded-2xl bg-brand-soft text-brand">
@@ -152,6 +162,8 @@ export default function AttachmentPreviewDialog({
                 >
                   {isImage(file) && urls[i] ? (
                     <img src={urls[i]} alt="" className="h-14 w-14 object-cover" />
+                  ) : isVideo(file) && urls[i] ? (
+                    <video src={urls[i]} muted playsInline preload="metadata" className="h-14 w-14 object-cover" />
                   ) : (
                     <span className="grid h-14 w-14 place-items-center rounded-lg bg-canvas text-muted">
                       <IconFile className="h-6 w-6" aria-hidden="true" />
@@ -170,6 +182,33 @@ export default function AttachmentPreviewDialog({
                 )}
               </div>
             ))}
+          </div>
+        )}
+
+        {sending && (
+          <div className="shrink-0 border-t border-line px-4 py-3" role="status">
+            <div className="flex items-center justify-between gap-3 text-metadata text-muted">
+              <span>Uploading {Math.round(progress * 100)}%</span>
+              <button
+                type="button"
+                onClick={onCancel}
+                className="text-brand hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand/30"
+              >
+                Cancel upload
+              </button>
+            </div>
+            <div
+              className="mt-2 h-1.5 overflow-hidden rounded-full bg-canvas"
+              role="progressbar"
+              aria-valuemin={0}
+              aria-valuemax={100}
+              aria-valuenow={Math.round(progress * 100)}
+            >
+              <div
+                className="h-full rounded-full bg-brand transition-[width] duration-150"
+                style={{ width: `${Math.round(progress * 100)}%` }}
+              />
+            </div>
           </div>
         )}
 

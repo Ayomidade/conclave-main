@@ -54,7 +54,7 @@ const {
 
 // --- The no-database checks --------------------------------------------------
 
-test('the MIME allowlist covers the agreed types and no video', () => {
+test('the MIME allowlist covers the agreed types', () => {
   for (const t of [
     'image/svg+xml', 'image/jpeg', 'image/png', 'image/gif', 'image/webp',
     'application/pdf', 'text/plain', 'text/markdown', 'text/csv',
@@ -70,9 +70,12 @@ test('the MIME allowlist covers the agreed types and no video', () => {
     assert.ok(ALLOWED_MIME_TYPES.has(t), `${t} should be allowed`);
   }
 
-  // Video is held back deliberately, not by oversight.
-  for (const t of ['video/mp4', 'video/quicktime', 'video/webm', 'video/x-msvideo']) {
-    assert.ok(!ALLOWED_MIME_TYPES.has(t), `${t} should not be allowed yet`);
+  for (const t of ['video/mp4', 'video/quicktime', 'video/webm', 'video/3gpp']) {
+    assert.ok(ALLOWED_MIME_TYPES.has(t), `${t} should be allowed`);
+  }
+  // Formats browsers cannot play stay refused.
+  for (const t of ['video/x-msvideo', 'video/x-matroska']) {
+    assert.ok(!ALLOWED_MIME_TYPES.has(t), `${t} should not be allowed`);
   }
 
   // Executables must never be accepted, whatever the declared type.
@@ -111,15 +114,21 @@ test('the fallback never yields a type outside the allowlist', () => {
 test('a declared type we understand but do not allow is still refused', () => {
   // Falling back to the extension here would be a way around the allowlist
   // rather than a repair of a missing value.
-  assert.equal(resolveMimetype('video/mp4', 'clip.mp4'), null);
+  assert.equal(resolveMimetype('video/x-msvideo', 'clip.avi'), null);
   assert.equal(resolveMimetype('text/html', 'page.html'), null);
   assert.equal(resolveMimetype('application/x-sh', 'install.sh'), null);
 });
 
-test('the video and executable extensions are not a back door', () => {
-  for (const name of ['clip.mp4', 'clip.webm', 'page.html', 'run.exe', 'setup.sh']) {
+test('executable, markup and unplayable-video extensions are not a back door', () => {
+  for (const name of ['page.html', 'run.exe', 'setup.sh', 'clip.avi', 'clip.mkv']) {
     assert.equal(resolveMimetype('application/octet-stream', name), null, `${name} must stay refused`);
   }
+});
+
+test('video extensions resolve when the declared type is meaningless', () => {
+  assert.equal(resolveMimetype('application/octet-stream', 'clip.mov'), 'video/quicktime');
+  assert.equal(resolveMimetype('', 'clip.mp4'), 'video/mp4');
+  assert.equal(resolveMimetype('application/octet-stream', 'clip.webm'), 'video/webm');
 });
 
 test('an unrecognised extension with a meaningless type is refused', () => {
@@ -172,14 +181,24 @@ test('a disallowed MIME type is rejected with 415 before any Cloudinary call', a
   assert.equal(error.status, 415, `expected 415, got ${error.status}`);
 });
 
-test('video is rejected with 415 while video support is held back', async () => {
+test('an unsupported video type is rejected with 415', async () => {
   if (!cloudinary.isConfigured()) return;
   const { error } = await callUpload({
     user: { id: 'x' },
-    file: { buffer: Buffer.alloc(1024), mimetype: 'video/mp4', originalname: 'clip.mp4' },
+    file: { buffer: Buffer.alloc(1024), mimetype: 'video/x-msvideo', originalname: 'clip.avi' },
   });
   assert.ok(error);
   assert.equal(error.status, 415);
+});
+
+test('a video over 50MB is rejected with 413', async () => {
+  if (!cloudinary.isConfigured()) return;
+  const { error } = await callUpload({
+    user: { id: 'x' },
+    file: { buffer: Buffer.alloc(51 * 1024 * 1024), mimetype: 'video/mp4', originalname: 'big.mp4' },
+  });
+  assert.ok(error);
+  assert.equal(error.status, 413);
 });
 
 test('a .md filed as octet-stream now clears the type check', async () => {

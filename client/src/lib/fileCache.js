@@ -23,205 +23,142 @@
  * but not open is worse than one that re-downloads.
  */
 
-const DB_NAME = 'conclave-files';
-const DB_VERSION = 1;
-const STORE = 'files';
-
+const DB_NAME = "conclave-files";
 const MAX_BYTES = 250 * 1024 * 1024;
 
+// Blobs and their bookkeeping live in separate stores. Marking a file as
+// recently used then rewrites a few bytes of metadata, not the whole file.
 let dbPromise = null;
 
-function openDb() {
-  if (dbPromise) return dbPromise;
-
-  dbPromise = new Promise((resolve, reject) => {
-    if (typeof indexedDB === 'undefined') {
-      reject(new Error('IndexedDB unavailable'));
-      return;
-    }
-
-    const request = indexedDB.open(DB_NAME, DB_VERSION);
-
-    request.onupgradeneeded = () => {
-      const db = request.result;
-      if (!db.objectStoreNames.contains(STORE)) {
-        const store = db.createObjectStore(STORE, { keyPath: 'url' });
-        store.createIndex('lastUsedAt', 'lastUsedAt');
-      }
-    };
-
-    request.onsuccess = () => resolve(request.result);
-    request.onerror = () => reject(request.error || new Error('Could not open file cache'));
-    request.onblocked = () => reject(new Error('File cache blocked by another tab'));
-  }).catch((error) => {
-    // Cache the failure too: a browser without IndexedDB should not pay the
-    // open cost on every read.
-    dbPromise = null;
-    throw error;
-  });
-
+function open() {
+  if (typeof indexedDB === "undefined")
+    return Promise.reject(new Error("IndexedDB unavailable"));
+  if (!dbPromise) {
+    dbPromise = new Promise((resolve, reject) => {
+      const request = indexedDB.open(DB_NAME, 1);
+      request.onupgradeneeded = () => {
+        request.result.createObjectStore("files", { keyPath: "key" });
+        request.result.createObjectStore("meta", { keyPath: "key" });
+      };
+      request.onsuccess = () => resolve(request.result);
+      request.onerror = () => {
+        dbPromise = null;
+        reject(request.error);
+      };
+    });
+  }
   return dbPromise;
 }
 
-/**
- * Read every record's metadata (no blobs) to get the running total and an
- * eviction order.
- *
- * @returns {Promise<Array<{url: string, size: number, lastUsedAt: number}>>}
- */
-async function readMeta() {
-  const db = await openDb();
-  return new Promise((resolve, reject) => {
-    const tx = db.transaction(STORE, 'readonly');
-    const request = tx.objectStore(STORE).getAll();
-    request.onsuccess = () => {
-      const rows = request.result || [];
-      resolve(
-        rows.map(({ url, size, lastUsedAt }) => ({
-          url,
-          size: Number(size) || 0,
-          lastUsedAt: Number(lastUsedAt) || 0,
-        })),
-      );
-    };
-    request.onerror = () => reject(request.error);
+function transact(stores, mode, work) {
+  return open().then(
+    (db) =>
+      new Promise((resolve, reject) => {
+        const transaction = db.transaction(stores, mode);
+        const out = work(transaction);
+        transaction.oncomplete = () =>
+          resolve(out && "result" in out ? out.result : out);
+        transaction.onerror = () => reject(transaction.error);
+        transaction.onabort = () => reject(transaction.error);
+      }),
+  );
+}
+
+let persistAsked = false;
+function askToPersist() {
+  if (persistAsked) return;
+  persistAsked = true;
+  navigator.storage?.persist?.().catch(() => {});
+}
+
+/** The stored file for this key, or null. Never throws: the cache is best effort. */
+export async function readLocalFile(key) {
+  if (!key) return null;
+  try {
+    const record = await transact(["files"], "readonly", (t) =>
+      t.objectStore("files").get(key),
+    );
+    if (!record) return null;
+
+    // Touch so eviction drops what is untouched, not what is popular.
+    transact(["meta"], "readwrite", (t) => {
+      const store = t.objectStore("meta");
+      const request = store.get(key);
+      request.onsuccess = () => {
+        if (request.result)
+          store.put({ ...request.result, lastUsed: Date.now() });
+      };
+    }).catch(() => {});
+
+    return record.blob;
+  } catch {
+    return null;
+  }
+}
+
+/** Store a file. Resolves once it is written, and swallows quota errors. */
+export async function saveLocalFile(key, blob, info = {}) {
+  if (!key || !blob) return;
+  try {
+    askToPersist();
+    await transact(["files", "meta"], "readwrite", (t) => {
+      t.objectStore("files").put({ key, blob });
+      t.objectStore("meta").put({
+        key,
+        size: blob.size,
+        filename: info.filename || null,
+        mime: info.mime || blob.type || null,
+        lastUsed: Date.now(),
+      });
+    });
+    await trim();
+  } catch {
+    // Quota exceeded or storage blocked. The file will simply be fetched next time.
+  }
+}
+
+async function trim(maxBytes = MAX_BYTES) {
+  const all = await transact(["meta"], "readonly", (t) =>
+    t.objectStore("meta").getAll(),
+  );
+  let total = all.reduce((sum, entry) => sum + (entry.size || 0), 0);
+  if (total <= maxBytes) return;
+
+  const oldestFirst = [...all].sort((a, b) => a.lastUsed - b.lastUsed);
+  const drop = [];
+  for (const entry of oldestFirst) {
+    if (total <= maxBytes) break;
+    drop.push(entry.key);
+    total -= entry.size || 0;
+  }
+
+  await transact(["files", "meta"], "readwrite", (t) => {
+    drop.forEach((key) => {
+      t.objectStore("files").delete(key);
+      t.objectStore("meta").delete(key);
+    });
   });
 }
 
-/**
- * Drop least-recently-used entries until `incoming` bytes fit under the cap.
- *
- * @param {number} incoming - size about to be written
- */
-async function evictToFit(incoming) {
-  let meta;
+export async function localFileUsage() {
   try {
-    meta = await readMeta();
+    const all = await transact(["meta"], "readonly", (t) =>
+      t.objectStore("meta").getAll(),
+    );
+    return all.reduce((sum, entry) => sum + (entry.size || 0), 0);
   } catch {
-    return;
-  }
-
-  let total = meta.reduce((sum, row) => sum + row.size, 0) + incoming;
-  if (total <= MAX_BYTES) return;
-
-  const oldestFirst = [...meta].sort((a, b) => a.lastUsedAt - b.lastUsedAt);
-
-  try {
-    const db = await openDb();
-    const tx = db.transaction(STORE, 'readwrite');
-    const store = tx.objectStore(STORE);
-    for (const row of oldestFirst) {
-      if (total <= MAX_BYTES) break;
-      store.delete(row.url);
-      total -= row.size;
-    }
-  } catch {
-    // Nothing to do: eviction is advisory.
+    return 0;
   }
 }
 
-/**
- * @param {string} url
- * @returns {Promise<Blob|null>} the cached bytes, or null on any miss
- */
-export async function getFile(url) {
-  if (!url) return null;
-
-  let db;
-  try {
-    db = await openDb();
-  } catch {
-    return null;
-  }
-
-  try {
-    const row = await new Promise((resolve, reject) => {
-      const tx = db.transaction(STORE, 'readonly');
-      const request = tx.objectStore(STORE).get(url);
-      request.onsuccess = () => resolve(request.result);
-      request.onerror = () => reject(request.error);
-    });
-
-    if (!row?.blob) return null;
-
-    // Touch on read, not on insert, so "recently used" tracks the last time
-    // the user actually saw the file. Fire-and-forget: a failed touch must not
-    // fail the read it accompanies.
-    const touched = db.transaction(STORE, 'readwrite');
-    touched.objectStore(STORE).put({
-      ...row,
-      lastUsedAt: Date.now(),
-    });
-    touched.onerror = () => {};
-
-    return row.blob;
-  } catch {
-    return null;
-  }
-}
-
-/**
- * @param {string} url
- * @param {Blob|File} blob
- * @returns {Promise<boolean>} whether the file is now cached
- */
-export async function putFile(url, blob) {
-  if (!url || !blob) return false;
-
-  const size = blob.size || 0;
-  if (size > MAX_BYTES) return false;
-
-  try {
-    await evictToFit(size);
-
-    const db = await openDb();
-    await new Promise((resolve, reject) => {
-      const tx = db.transaction(STORE, 'readwrite');
-      tx.objectStore(STORE).put({ url, blob, size, lastUsedAt: Date.now() });
-      tx.oncomplete = () => resolve();
-      tx.onerror = () => reject(tx.error);
-      tx.onabort = () => reject(tx.error);
-    });
-    return true;
-  } catch {
-    return false;
-  }
-}
-
-/**
- * Wipe everything.
- *
- * Called on sign-out. The cache is keyed by URL and URLs are per-account
- * signed or short-lived, and more to the point a shared device should not
- * still hold one user's conversation after another logs in — "cache" is a
- * performance detail, not a licence to retain.
- *
- * @returns {Promise<void>}
- */
+/** For logout and for a "clear downloaded media" button in Settings. */
 export async function clearLocalFiles() {
   try {
-    const db = await openDb();
-    await new Promise((resolve) => {
-      const tx = db.transaction(STORE, 'readwrite');
-      tx.objectStore(STORE).clear();
-      tx.oncomplete = () => resolve();
-      tx.onerror = () => resolve();
-      tx.onabort = () => resolve();
+    await transact(["files", "meta"], "readwrite", (t) => {
+      t.objectStore("files").clear();
+      t.objectStore("meta").clear();
     });
   } catch {
-    // Nothing retained, or nothing to clear.
-  }
-
-  try {
-    await new Promise((resolve) => {
-      const request = indexedDB.deleteDatabase(DB_NAME);
-      request.onsuccess = () => resolve();
-      request.onerror = () => resolve();
-      // Another tab may hold the DB open; the store is already empty, so this
-      // does not need to block sign-out.
-      request.onblocked = () => resolve();
-    });
-  } catch {
-    // Ignore.
+    // Nothing stored, or storage unavailable.
   }
 }

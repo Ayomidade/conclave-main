@@ -21,14 +21,14 @@
  */
 const WIDTHS = {
   form: 'max-w-2xl',
-  content: 'max-w-3xl',
+  content: 'max-w-4xl',
   board: 'max-w-6xl',
 };
 
 export default function Page({ width = 'content', className = '', children }) {
   return (
     <div className="h-full min-h-0 overflow-y-auto overscroll-contain">
-      <div className={`mx-auto w-full px-4 py-8 md:px-7 ${WIDTHS[width]} ${className}`}>
+      <div className={`mx-auto w-full min-w-0 px-4 py-6 md:px-7 md:py-8 ${WIDTHS[width]} ${className}`}>
         {children}
       </div>
     </div>

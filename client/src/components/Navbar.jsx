@@ -1,6 +1,6 @@
 import { NavLink, useLocation, useMatch } from "react-router-dom";
 import { useNotifications } from "@/contexts/NotificationsContext";
-import Logo from "@/components/landing/Logo";
+import wordmarkUrl from "@/assets/brand/conclave-wordmark.svg";
 import IconMenu from "../assets/icons/menu.svg?react";
 import IconNotify from "../assets/icons/notify.svg?react";
 
@@ -65,19 +65,16 @@ export default function Navbar({
           className={`flex min-w-0 items-center justify-between px-3 ${roomOwnsRow ? "hidden md:flex" : ""}`}
         >
           <NavLink to="/chats" aria-label="Conclave, home" className="md:hidden">
-            <Logo withWordmark />
+            <img
+              src={wordmarkUrl}
+              alt=""
+              width="128"
+              height="34"
+              className="h-8 w-auto"
+            />
           </NavLink>
 
           <div className="ml-auto flex items-center gap-1 md:ml-0">
-            <button
-              type="button"
-              onClick={onMenuClick}
-              aria-label={menuLabel}
-              className={iconButton}
-            >
-              <IconMenu className="h-6 w-6" aria-hidden="true" />
-            </button>
-
             <NavLink
               to="/notifications"
               aria-label={
@@ -94,6 +91,15 @@ export default function Navbar({
                 </span>
               )}
             </NavLink>
+
+            <button
+              type="button"
+              onClick={onMenuClick}
+              aria-label={menuLabel}
+              className={iconButton}
+            >
+              <IconMenu className="h-6 w-6" aria-hidden="true" />
+            </button>
 
             <div className="ml-2 hidden min-w-0 flex-1 truncate text-h2 text-ink md:block">
               {titleFor(pathname)}

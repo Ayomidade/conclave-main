@@ -91,7 +91,10 @@ function deriveFromUrl(fileUrl) {
   const publicId = segments.join('/');
   if (!publicId) return null;
 
-  const resourceType = String(fileUrl).includes('/raw/upload/') ? 'raw' : 'image';
+  const url = String(fileUrl);
+  let resourceType = 'image';
+  if (url.includes('/raw/upload/')) resourceType = 'raw';
+  else if (url.includes('/video/upload/')) resourceType = 'video';
   return { publicId, resourceType };
 }
 

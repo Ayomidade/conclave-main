@@ -1,9 +1,11 @@
 import { createContext, useContext, useEffect, useMemo, useState } from "react";
 import { isDevAuthBypass, previewUser } from "../config/devPreview";
 import * as authService from "../services/auth.service";
-import { clearLocalFiles } from "../services/attachments.service";
+import { clearLocalFiles } from "../lib/fileCache";
 import { deleteAccount as deleteAccountRequest, updateProfile as updateProfileRequest } from "../services/users.service";
+
 const AuthContext = createContext(null);
+
 export function AuthProvider({ children }) {
   const [user, setUser] = useState(isDevAuthBypass ? previewUser : null);
   const [isLoading, setIsLoading] = useState(!isDevAuthBypass);
@@ -51,15 +53,12 @@ export function AuthProvider({ children }) {
     const session = await authService.register(values);
     setUser(session.user);
   }
-  async function logout() {
+    async function logout() {
     if (isDevAuthBypass) {
       setUser(previewUser);
       return;
     }
     await authService.logout();
-    // After the server call, not before: if signing out fails the files are
-    // still the signed-in user's, and clearing them first would destroy the
-    // cache of a session that just refused to end.
     await clearLocalFiles();
     setUser(null);
   }

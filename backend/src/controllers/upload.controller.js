@@ -6,14 +6,14 @@ const { ok } = require('../utils/apiResponse');
 
 // BACKEND_TASKS.md item C: which uploads we accept.
 //
-// Video is deliberately absent for now — the 25MB cap in upload.routes.js is a
-// poor ceiling for it, so it is held back rather than half-supported.
+// Video is accepted up to 50MB (MAX_VIDEO_BYTES), against 25MB for everything
+// else. It is stored as a Cloudinary `video` asset, a separate store from
+// images and raw files.
 //
-// SVG is allowed. It is safe in the current client, which renders only the
-// filename and never the URL, and it stays safe if previews are added later
-// because <img src> does not execute script in an SVG. The exposure would be
-// <object>, <embed>, or inlining the markup — avoid those. The real residual
-// risk is a user hosting branded content on our Cloudinary quota.
+// SVG is allowed. The client renders it only through <img src>, which does not
+// execute script in an SVG. The exposure would be <object>, <embed>, or
+// inlining the markup — avoid those. The real residual risk is a user hosting
+// branded content on our Cloudinary quota.
 //
 // NOTE: this list is checked against req.file.mimetype, which is the
 // client-declared multipart Content-Type, not a sniffed type. A client can
@@ -27,6 +27,11 @@ const ALLOWED_MIME_TYPES = new Set([
   'image/png',
   'image/gif',
   'image/webp',
+  // video
+  'video/mp4',
+  'video/webm',
+  'video/quicktime',
+  'video/3gpp',
   // documents
   'application/pdf',
   'text/plain',
@@ -68,10 +73,8 @@ const UNKNOWN_MIME_TYPES = new Set([
 ]);
 
 // Only extensions for types already on the allowlist are mapped, so this can
-// never widen it. `.mp4` and `.webm` are deliberately absent: the allowlist
-// holds audio/mp4 and audio/webm, and mapping the video extensions onto those
-// would let video in through the back door while video support is held back.
-// `.m4a` and `.weba` are the audio files those entries were meant for.
+// never widen it. `.m4a` and `.weba` are the audio files audio/mp4 and
+// audio/webm were meant for; `.mp4` and `.webm` are video.
 const EXTENSION_MIME_TYPES = new Map([
   ['svg', 'image/svg+xml'],
   ['jpg', 'image/jpeg'],
@@ -79,6 +82,11 @@ const EXTENSION_MIME_TYPES = new Map([
   ['png', 'image/png'],
   ['gif', 'image/gif'],
   ['webp', 'image/webp'],
+  ['mp4', 'video/mp4'],
+  ['m4v', 'video/mp4'],
+  ['mov', 'video/quicktime'],
+  ['webm', 'video/webm'],
+  ['3gp', 'video/3gpp'],
   ['pdf', 'application/pdf'],
   ['txt', 'text/plain'],
   ['md', 'text/markdown'],
@@ -104,7 +112,7 @@ const EXTENSION_MIME_TYPES = new Map([
  *
  * An allowlisted declared type always wins. Otherwise the type is consulted
  * only when it is one of the meaningless ones above — a declared type we
- * understand but do not allow (video, HTML, an executable) is still refused,
+ * understand but do not allow (HTML, an executable) is still refused,
  * because falling back to the extension there would be a way around the
  * allowlist rather than a repair of a missing value.
  *
@@ -123,10 +131,15 @@ function resolveMimetype(mimetype, filename) {
   return EXTENSION_MIME_TYPES.get(name.slice(dot + 1).toLowerCase()) || null;
 }
 
-// Keep in step with the multer limit in upload.routes.js. Redundant on the happy
-// path — multer rejects anything larger before we get here — but it means the
-// bound does not live in exactly one place.
+// Keep the controller's per-type bounds alongside multer's 50MB outer bound.
+// Multer admits video-sized uploads, and this controller applies the smaller
+// limit to every non-video file.
 const MAX_UPLOAD_BYTES = 25 * 1024 * 1024;
+const MAX_VIDEO_BYTES = 50 * 1024 * 1024;
+
+function limitFor(mimetype) {
+  return mimetype.startsWith('video/') ? MAX_VIDEO_BYTES : MAX_UPLOAD_BYTES;
+}
 
 /**
  * Where an asset is stored in Cloudinary.
@@ -143,10 +156,12 @@ const MAX_UPLOAD_BYTES = 25 * 1024 * 1024;
  * written for it, which is worse than deciding once and storing the answer.
  *
  * @param {string} mimetype - as declared by the client (see note above)
- * @returns {'image'|'raw'}
+ * @returns {'image'|'video'|'raw'}
  */
 function resourceTypeFor(mimetype) {
-  return mimetype.startsWith('image/') ? 'image' : 'raw';
+  if (mimetype.startsWith('image/')) return 'image';
+  if (mimetype.startsWith('video/')) return 'video';
+  return 'raw';
 }
 
 /**
@@ -240,8 +255,9 @@ const uploadFile = asyncHandler(async (req, res) => {
     throw new ApiError(415, `Unsupported file type: ${declaredType || 'unknown'}`);
   }
 
-  if (buffer.length > MAX_UPLOAD_BYTES) {
-    throw new ApiError(413, 'File exceeds the 25MB limit');
+  const limit = limitFor(mimetype);
+  if (buffer.length > limit) {
+    throw new ApiError(413, `File exceeds the ${limit / (1024 * 1024)}MB limit`);
   }
 
   let asset;
@@ -291,7 +307,9 @@ module.exports = {
   uploadFile,
   resourceTypeFor,
   resolveMimetype,
+  limitFor,
   ALLOWED_MIME_TYPES,
   EXTENSION_MIME_TYPES,
   MAX_UPLOAD_BYTES,
+  MAX_VIDEO_BYTES,
 };
