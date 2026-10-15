@@ -5,6 +5,8 @@ const { createMessage } = require('../services/message.service');
 const { personalRoom } = require('../services/notification.service');
 const presence = require('../services/presence.service');
 const socketHandler = require('../utils/socketHandler');
+const rateLimit = require('../middlewares/rateLimit.middleware');
+const ApiError = require('../utils/ApiError');
 
 // Event names match what was scoped in the original planning conversation.
 //
@@ -218,12 +220,6 @@ function registerSocketHandlers(io) {
       if (!roomId) return;
 
       socket.leave(roomId);
-      // Stamp last_seen_at before leaving so the digest window closes when
-      // the user actually goes away (BACKEND_TASKS.md Bug 2).
-      await query(
-        `UPDATE room_members SET last_seen_at = NOW() WHERE room_id = $1 AND user_id = $2`,
-        [roomId, userId],
-      );
       await presence.userLeftRoom(userId, roomId);
       const roomOnlineUsers = await presence.getRoomOnlineUsers(roomId);
       io.to(roomId).emit('room-presence', {
@@ -236,10 +232,12 @@ function registerSocketHandlers(io) {
     // mentionedUserIds is how a client says who was mentioned. Optional for now:
     // omitting it falls back to matching display names in the text, which is
     // temporary — see resolveMentionIds in services/message.service.js.
-    onEvent('send-message', async ({ roomId, content, replyToId, attachments, mentionedUserIds }) => {
+    onEvent('send-message', async ({ roomId, clientId, content, replyToId, attachments, mentionedUserIds }) => {
+      if (!rateLimit.consume(`socket:${userId}:messages`, { max: 30 })) throw new ApiError(429, 'Too many messages. Please try again shortly.');
       const message = await createMessage({
         roomId,
         senderId: userId,
+        clientId,
         content,
         replyToId,
         attachments,
@@ -251,7 +249,8 @@ function registerSocketHandlers(io) {
       await presence.clearTyping(roomId, userId);
       socket.to(roomId).emit('stop-typing', { roomId, userId });
 
-      io.to(roomId).emit('receive-message', { message });
+      if (!message._idempotentRetry) io.to(roomId).emit('receive-message', { message });
+      return message;
     });
 
     // --- typing indicators: Redis-backed with auto-expiry ---
@@ -290,18 +289,37 @@ function registerSocketHandlers(io) {
       if (!(await isMember(roomId, userId))) return;
 
       const result = await query(
-        `UPDATE room_members
-            SET last_seen_at = NOW()
-          WHERE room_id = $1 AND user_id = $2
-          RETURNING last_seen_at`,
-        [roomId, userId],
+        `UPDATE room_members rm
+            SET last_seen_at = GREATEST(rm.last_seen_at, m.created_at),
+                last_seen_sequence = GREATEST(rm.last_seen_sequence, m.room_sequence)
+           FROM messages m
+          WHERE rm.room_id = $1 AND rm.user_id = $2 AND m.id = $3 AND m.room_id = rm.room_id
+          RETURNING rm.last_seen_at, rm.last_seen_sequence`,
+        [roomId, userId, messageId],
       );
       const lastSeenAt = result.rows[0]?.last_seen_at;
+      const lastSeenSequence = result.rows[0]?.last_seen_sequence;
 
       // Broadcast to the room including the sender, so the reader's own client
       // converges on the same timestamp the server stored rather than assuming
       // one. `.to()` would exclude them and leave their tick on a guess.
-      io.to(roomId).emit('message-read', { roomId, messageId, userId, lastSeenAt });
+      io.to(roomId).emit('message-read', { roomId, messageId, userId, lastSeenAt, lastSeenSequence });
+      const { emitChatUpdated } = require('../services/notification.service');
+      await emitChatUpdated(io, roomId);
+    });
+
+    onEvent('message-delivered', async ({ roomId, messageId }) => {
+      if (!roomId || !messageId || !(await isMember(roomId, userId))) return;
+      const result = await query(
+        `UPDATE room_members rm SET last_delivered_sequence = GREATEST(rm.last_delivered_sequence, m.room_sequence)
+           FROM messages m
+          WHERE rm.room_id = $1 AND rm.user_id = $2 AND m.id = $3 AND m.room_id = rm.room_id
+          RETURNING rm.last_delivered_sequence`,
+        [roomId, userId, messageId],
+      );
+      if (result.rows.length) io.to(roomId).emit('message-delivered', {
+        roomId, userId, lastDeliveredSequence: result.rows[0].last_delivered_sequence,
+      });
     });
 
     // --- heartbeat: refresh the user's presence TTL ---

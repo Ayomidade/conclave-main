@@ -206,6 +206,30 @@ const getAttachment = asyncHandler(async (req, res) => {
   });
 });
 
+const getAttachmentUrl = asyncHandler(async (req, res) => {
+  if (!cloudinary.isConfigured()) throw new ApiError(503, 'File storage is not configured');
+  const { attachmentId } = req.params;
+  const result = await query(
+    `SELECT a.id, a.file_url, a.public_id, a.resource_type
+       FROM attachments a
+       INNER JOIN messages m ON m.id = a.message_id
+       INNER JOIN room_members rm ON rm.room_id = m.room_id AND rm.user_id = $2
+      WHERE a.id = $1`,
+    [attachmentId, req.user.id],
+  );
+  if (!result.rows.length) throw new ApiError(404, 'Attachment not found');
+  const row = result.rows[0];
+  const coords = row.public_id ? { publicId: row.public_id, resourceType: row.resource_type || 'image' } : deriveFromUrl(row.file_url);
+  if (!coords) throw new ApiError(502, 'Attachment storage is temporarily unavailable');
+  const url = cloudinary.url(coords.publicId, { resource_type: coords.resourceType, secure: true });
+  const token = cloudinary.utils.generate_auth_token({
+    duration: 3600,
+    url: new URL(url).pathname,
+    key: env.cloudinary.apiSecret,
+  });
+  return ok(res, { url: `${url}?${token}`, expiresAt: Math.floor(Date.now() / 1000) + 3600 });
+});
+
 // A filename is echoed into a Content-Disposition header, which is a response
 // header and cannot carry a newline. Quotes and separators go too: the value is
 // quoted in the header, so an embedded quote would end the token early.
@@ -216,4 +240,4 @@ function sanitiseFilename(filename) {
     .slice(0, 120) || 'download';
 }
 
-module.exports = { getAttachment, deriveFromUrl, sanitiseFilename, signedDeliveryUrl };
+module.exports = { getAttachment, getAttachmentUrl, deriveFromUrl, sanitiseFilename, signedDeliveryUrl };

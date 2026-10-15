@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useAuth } from '../contexts/AuthContext';
 import { useRealtime } from '../contexts/RealtimeContext';
+import { deleteOutbox, listOutbox, putOutbox, readRoomMessages, saveRoomMessages } from '../lib/fileCache';
 import {
   addReaction as addReactionApi,
   deleteMessage as deleteMessageApi,
@@ -20,6 +21,7 @@ const PAGE_SIZE = 50;
 const TYPING_TIMEOUT_MS = 6000;
 
 function byTime(a, b) {
+  if (a.room_sequence != null && b.room_sequence != null) return Number(a.room_sequence) - Number(b.room_sequence);
   return new Date(a.created_at) - new Date(b.created_at) || String(a.id).localeCompare(String(b.id));
 }
 
@@ -31,6 +33,10 @@ function mergeMessages(current, rows) {
 
 let tempId = 0;
 const nextTempId = () => `optimistic-${Date.now()}-${tempId++}`;
+const nextClientId = () => globalThis.crypto?.randomUUID?.() || 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, (char) => {
+  const value = Math.floor(Math.random() * 16);
+  return (char === 'x' ? value : (value & 0x3) | 0x8).toString(16);
+});
 
 /**
  * One room's timeline: history, live updates, delivery state and read
@@ -66,6 +72,11 @@ export default function useMessages(roomId, roomMembers = []) {
   const [pendingIds, setPendingIds] = useState(() => new Set());
   const [failedIds, setFailedIds] = useState(() => new Set());
   const [readPointers, setReadPointers] = useState(() => new Map());
+  const [readSequences, setReadSequences] = useState(() => new Map());
+  const [deliveredSequences, setDeliveredSequences] = useState(() => new Map());
+  const [lastSeenSequence, setLastSeenSequence] = useState(0);
+  const messagesRef = useRef(messages);
+  messagesRef.current = messages;
 
   const typingTimers = useRef(new Map());
 
@@ -81,12 +92,38 @@ export default function useMessages(roomId, roomMembers = []) {
     setError('');
     setMessages([]);
     setNextCursor(null);
+    readRoomMessages(viewerId, roomId).then((cached) => {
+      if (active && cached.length) {
+        setMessages(mergeMessages([], cached));
+        setIsLoading(false);
+      }
+    });
+    listOutbox(viewerId, roomId).then((queued) => {
+      if (!active || !queued.length) return;
+      setIsLoading(false);
+      setMessages((current) => mergeMessages(current, queued.map((item) => ({
+        id: item.tempId,
+        client_id: item.clientId,
+        room_id: roomId,
+        sender_id: viewerId,
+        sender_name: user?.display_name || 'You',
+        content: item.payload.content || '',
+        reply_to_id: item.payload.replyToId || null,
+        attachments: item.payload.attachments || [],
+        reactions: [],
+        created_at: item.createdAt || new Date().toISOString(),
+        _optimistic: true,
+      }))));
+      setPendingIds((current) => new Set([...current, ...queued.map((item) => item.tempId)]));
+    });
 
     listMessages(roomId)
       .then(({ messages: rows, nextCursor: cursor }) => {
         if (!active) return;
-        setMessages(mergeMessages([], rows));
+        setMessages((current) => mergeMessages(current, rows));
         setNextCursor(cursor);
+        saveRoomMessages(viewerId, roomId, rows);
+        if (socket?.connected) rows.filter((message) => message.sender_id !== viewerId).forEach((message) => socket.emit('message-delivered', { roomId, messageId: message.id }));
       })
       .catch((err) => {
         if (active) setError(err.response?.data?.message || 'Could not load messages.');
@@ -98,29 +135,68 @@ export default function useMessages(roomId, roomMembers = []) {
     return () => {
       active = false;
     };
-  }, [roomId]);
+  }, [roomId, viewerId, user?.display_name, socket]);
+
+  useEffect(() => {
+    if (messages.length) saveRoomMessages(viewerId, roomId, messages);
+  }, [messages, roomId, viewerId]);
 
   // --- read pointers ---------------------------------------------------------
   // Seeded from the room's member list, which already carries each member's
   // last_seen_at. Socket updates advance that map in place; nothing re-fetches.
   useEffect(() => {
-    setReadPointers(() => {
-      const map = new Map();
-      (roomMembers || []).forEach((member) => {
-        if (member?.id) map.set(member.id, member.last_seen_at);
-      });
-      return map;
+    const map = new Map();
+    const sequences = new Map();
+    const delivered = new Map();
+    (roomMembers || []).forEach((member) => {
+      if (member?.id) {
+        map.set(member.id, member.last_seen_at);
+        sequences.set(member.id, Number(member.last_seen_sequence) || 0);
+        delivered.set(member.id, Number(member.last_delivered_sequence) || 0);
+      }
     });
-  }, [roomMembers]);
+    setReadPointers(map);
+    setReadSequences(sequences);
+    setDeliveredSequences(delivered);
+    const own = (roomMembers || []).find((member) => member?.id === viewerId);
+    setLastSeenSequence(Number(own?.last_seen_sequence) || 0);
+  }, [roomMembers, viewerId]);
 
   // --- live ------------------------------------------------------------------
   useEffect(() => {
     if (!socket || !roomId) return undefined;
 
-    const join = () => socket.emit('join-room', { roomId });
+    const fillGap = async () => {
+      try {
+        let sequence = Math.max(0, ...messagesRef.current.map((item) => Number(item.room_sequence) || 0));
+        let missing;
+        do {
+          ({ messages: missing } = await listMessages(roomId, undefined, sequence));
+          if (missing.length) {
+            setMessages((current) => mergeMessages(current, missing));
+            missing.filter((message) => message.sender_id !== viewerId).forEach((message) => socket.emit('message-delivered', { roomId, messageId: message.id }));
+            sequence = Math.max(sequence, ...missing.map((item) => Number(item.room_sequence) || 0));
+          }
+        } while (missing.length === 200);
+      } catch { /* reconnect will retry on the next connect */ }
+    };
+    const join = () => {
+      socket.emit('join-room', { roomId });
+      fillGap();
+      listOutbox(viewerId, roomId).then((items) => items.forEach((item) => {
+        socket.emit('send-message', item.payload, (ack) => {
+          if (!ack?.ok) return;
+          deleteOutbox(item.key);
+          setMessages((current) => mergeMessages(current.filter((m) => m.client_id !== item.clientId), [ack.data]));
+          setPendingIds((current) => { const next = new Set(current); next.delete(item.tempId); return next; });
+          setFailedIds((current) => { const next = new Set(current); next.delete(item.tempId); return next; });
+        });
+      }));
+    };
 
     const receive = ({ message }) => {
       if (message.room_id !== roomId) return;
+      if (message.sender_id !== viewerId && socket.connected) socket.emit('message-delivered', { roomId, messageId: message.id });
       setMessages((current) => {
         let next = current;
         // Withdraw the optimistic row this one is the acknowledgement of.
@@ -132,9 +208,7 @@ export default function useMessages(roomId, roomMembers = []) {
           // to a different pending row with the same words.
           const index = current.findIndex(
             (item) =>
-              item._optimistic &&
-              (item.content || '') === (message.content || '') &&
-              (item.attachments?.length || 0) === (message.attachments?.length || 0),
+              item._optimistic && item.client_id === message.client_id,
           );
           if (index !== -1) {
             const withdrawn = current[index];
@@ -148,6 +222,15 @@ export default function useMessages(roomId, roomMembers = []) {
         }
         if (next.some((item) => item.id === message.id)) return next;
         return [...next, message].sort(byTime);
+      });
+    };
+
+    const onDelivered = ({ roomId: eventRoom, userId, lastDeliveredSequence }) => {
+      if (eventRoom !== roomId || lastDeliveredSequence == null) return;
+      setDeliveredSequences((prev) => {
+        const next = new Map(prev);
+        next.set(userId, Math.max(next.get(userId) || 0, Number(lastDeliveredSequence) || 0));
+        return next;
       });
     };
 
@@ -203,7 +286,7 @@ export default function useMessages(roomId, roomMembers = []) {
     // A read pointer is a room-level fact about a member, not about one message,
     // so both events write the same map. The message id on `message-read` is
     // only there so a client can highlight the row that triggered it.
-    const onReadPointer = ({ roomId: eventRoom, userId, lastSeenAt }) => {
+    const onReadPointer = ({ roomId: eventRoom, userId, lastSeenAt, lastSeenSequence: sequence }) => {
       if (eventRoom !== roomId || !lastSeenAt) return;
       setReadPointers((prev) => {
         const next = new Map(prev);
@@ -215,26 +298,17 @@ export default function useMessages(roomId, roomMembers = []) {
         next.set(userId, lastSeenAt);
         return next;
       });
-    };
-
-    const onError = () => {
-      // The server emits `error:message` without naming which send failed, so
-      // the oldest unacknowledged row is the one that timed out — a later send
-      // cannot have failed before an earlier one was rejected.
-      setPendingIds((pending) => {
-        const oldest = [...pending][0];
-        if (!oldest) return pending;
-        const rest = new Set(pending);
-        rest.delete(oldest);
-        // Failed rather than pending: it is never coming back, and leaving it
-        // pending would spin forever with no way for the reader to tell.
-        setFailedIds((prev) => new Set(prev).add(oldest));
-        return rest;
+      if (sequence != null) setReadSequences((prev) => {
+        const next = new Map(prev);
+        next.set(userId, Math.max(next.get(userId) || 0, Number(sequence) || 0));
+        return next;
       });
+      if (userId === viewerId && sequence != null) setLastSeenSequence((value) => Math.max(value, Number(sequence) || 0));
     };
 
     socket.on('connect', join);
     socket.on('receive-message', receive);
+    socket.on('message-delivered', onDelivered);
     socket.on('message:updated', replaceMessage);
     socket.on('message:deleted', replaceMessage);
     socket.on('message:reaction', replaceMessage);
@@ -249,7 +323,6 @@ export default function useMessages(roomId, roomMembers = []) {
     socket.on('room-typing', onRoomTyping);
     socket.on('message-read', onReadPointer);
     socket.on('room-seen', onReadPointer);
-    socket.on('error:message', onError);
 
     if (socket.connected) join();
 
@@ -258,6 +331,7 @@ export default function useMessages(roomId, roomMembers = []) {
       typingTimers.current.clear();
       socket.off('connect', join);
       socket.off('receive-message', receive);
+      socket.off('message-delivered', onDelivered);
       socket.off('message:updated', replaceMessage);
       socket.off('message:deleted', replaceMessage);
       socket.off('message:reaction', replaceMessage);
@@ -269,7 +343,6 @@ export default function useMessages(roomId, roomMembers = []) {
       socket.off('room-typing', onRoomTyping);
       socket.off('message-read', onReadPointer);
       socket.off('room-seen', onReadPointer);
-      socket.off('error:message', onError);
       if (socket.connected) socket.emit('leave-room', { roomId });
     };
   }, [roomId, socket, viewerId]);
@@ -286,13 +359,13 @@ export default function useMessages(roomId, roomMembers = []) {
    */
   const sendMessage = useCallback(
     ({ content, replyToId, attachments, mentionedUserIds } = {}) => {
-      if (!socket?.connected) {
-        throw new Error('Realtime connection is unavailable.');
-      }
       const text = (content || '').trim();
       if (!text && !(attachments && attachments.length)) return;
 
       const id = nextTempId();
+      const clientId = nextClientId();
+      const payload = { roomId, clientId, content: text, replyToId, attachments, mentionedUserIds };
+      const outboxKey = `${viewerId}:${roomId}:${clientId}`;
       setPendingIds((prev) => new Set(prev).add(id));
       setFailedIds((prev) => {
         const copy = new Set(prev);
@@ -304,6 +377,7 @@ export default function useMessages(roomId, roomMembers = []) {
           ...current,
           {
             id,
+            client_id: clientId,
             room_id: roomId,
             sender_id: viewerId,
             sender_name: user?.display_name || 'You',
@@ -318,12 +392,18 @@ export default function useMessages(roomId, roomMembers = []) {
         ].sort(byTime),
       );
 
-      socket.emit('send-message', {
-        roomId,
-        content: text,
-        replyToId,
-        attachments,
-        mentionedUserIds,
+      const item = { key: outboxKey, userId: viewerId, roomId, clientId, tempId: id, payload, createdAt: Date.now() };
+      putOutbox(item);
+      if (socket?.connected) socket.emit('send-message', payload, (ack) => {
+        if (!ack?.ok) {
+          setFailedIds((prev) => new Set(prev).add(id));
+          setPendingIds((prev) => { const next = new Set(prev); next.delete(id); return next; });
+          return;
+        }
+        deleteOutbox(outboxKey);
+        setMessages((current) => mergeMessages(current.filter((m) => m.client_id !== clientId), [ack.data]));
+        setPendingIds((prev) => { const next = new Set(prev); next.delete(id); return next; });
+        setFailedIds((prev) => { const next = new Set(prev); next.delete(id); return next; });
       });
       // No `typing` emit here. Sending clears the sender's typing state on the
       // server, so announcing one would put them back on the list the moment
@@ -346,7 +426,7 @@ export default function useMessages(roomId, roomMembers = []) {
       setMessages((current) => {
         const known = new Set(current.map((m) => m.id));
         const older = rows.filter((m) => !known.has(m.id));
-        return [...older, ...current];
+        return mergeMessages(current, older);
       });
       setNextCursor(cursor);
     } catch (err) {
@@ -406,6 +486,9 @@ export default function useMessages(roomId, roomMembers = []) {
     unpinMessage,
     typingUserIds,
     readPointers,
+    readSequences,
+    deliveredSequences,
+    lastSeenSequence,
     deliveryIds,
   };
 }

@@ -500,6 +500,7 @@ export const previewPreferences = {
 };
 
 const listeners = new Map();
+let previewSequence = 100;
 export const previewSocket = {
   connected: true,
   on(event, handler) {
@@ -510,7 +511,7 @@ export const previewSocket = {
   off(event, handler) {
     listeners.get(event)?.delete(handler);
   },
-  emit(event, payload = {}) {
+  emit(event, payload = {}, acknowledge) {
     // Typing is echoed back as room-typing so the indicator renders offline.
     // `stop-typing` is dropped deliberately: sending clears the sender's typing
     // state, and echoing it would put them straight back on the list.
@@ -529,6 +530,8 @@ export const previewSocket = {
 
     const message = {
       id: `dev-message-${Date.now()}`,
+      client_id: payload.clientId || null,
+      room_sequence: ++previewSequence,
       room_id: payload.roomId,
       sender_id: previewUser.id,
       sender_name: previewUser.display_name,
@@ -550,5 +553,6 @@ export const previewSocket = {
         .get('receive-message')
         ?.forEach((handler) => handler({ message })),
     );
+    acknowledge?.({ ok: true, data: message });
   },
 };

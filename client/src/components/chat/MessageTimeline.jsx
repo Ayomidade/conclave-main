@@ -55,6 +55,9 @@ export default function MessageTimeline({
   onPin,
   onUnpin,
   onToggleReaction,
+  lastSeenSequence = 0,
+  onMessageVisible,
+  onOpenThread,
 }) {
   const contentRef = useRef(null);
   const topSentinelRef = useRef(null);
@@ -64,6 +67,7 @@ export default function MessageTimeline({
   const heightBeforeOlderRef = useRef(0);
   const [showJump, setShowJump] = useState(false);
   const [newBelow, setNewBelow] = useState(0);
+  const visibleIds = useRef(new Set());
 
   const hasMessages = messages.length > 0;
   const annotated = useMemo(() => annotateMessages(messages), [messages]);
@@ -71,6 +75,13 @@ export default function MessageTimeline({
     () => new Map(annotated.map((message) => [message.id, message])),
     [annotated],
   );
+  const firstUnreadId = useMemo(() => {
+    const unread = annotated.find((message) => Number(message.room_sequence || 0) > Number(lastSeenSequence) && message.sender_id !== viewerId);
+    return unread?.id || null;
+  }, [annotated, lastSeenSequence, viewerId]);
+  const unreadCount = useMemo(() => annotated.filter((message) =>
+    Number(message.room_sequence || 0) > Number(lastSeenSequence) && message.sender_id !== viewerId,
+  ).length, [annotated, lastSeenSequence, viewerId]);
 
   // A Map lookup instead of a scan per row.
   const replyTargetFor = (message) =>
@@ -113,10 +124,16 @@ export default function MessageTimeline({
     const seen = lastSeenRef.current;
 
     if (placedRoomRef.current !== roomId) {
-      // 1. First paint of this room: open at the latest message.
+      // 1. First paint opens at the unread boundary when one exists.
       placedRoomRef.current = roomId;
-      container.scrollTop = container.scrollHeight;
-      stickRef.current = true;
+      const target = firstUnreadId && container.querySelector(`[data-message-id="${firstUnreadId}"]`);
+      if (target) {
+        container.scrollTop += target.getBoundingClientRect().top - container.getBoundingClientRect().top;
+        stickRef.current = false;
+      } else {
+        container.scrollTop = container.scrollHeight;
+        stickRef.current = true;
+      }
     } else if (seen.firstId && first.id !== seen.firstId && last.id === seen.lastId) {
       // 2. Older page prepended: keep the reader on the message they were on.
       if (heightBeforeOlderRef.current > 0) {
@@ -137,7 +154,24 @@ export default function MessageTimeline({
     }
 
     lastSeenRef.current = { firstId: first.id, lastId: last.id };
-  }, [annotated, roomId, viewerId, scrollContainerRef]);
+  }, [annotated, firstUnreadId, roomId, viewerId, scrollContainerRef]);
+
+  useEffect(() => {
+    const container = scrollContainerRef?.current;
+    if (!container || !onMessageVisible || typeof IntersectionObserver === 'undefined') return undefined;
+    const observer = new IntersectionObserver((entries) => {
+      entries.forEach((entry) => {
+        if (!entry.isIntersecting) return;
+        const id = entry.target.getAttribute('data-message-id');
+        const message = annotated.find((row) => row.id === id);
+        if (!message || visibleIds.current.has(id)) return;
+        visibleIds.current.add(id);
+        onMessageVisible(message);
+      });
+    }, { root: container, threshold: 0.55 });
+    container.querySelectorAll('[data-message-id]').forEach((node) => observer.observe(node));
+    return () => observer.disconnect();
+  }, [annotated, onMessageVisible, scrollContainerRef]);
 
   // Images loading, the composer growing and the mobile keyboard opening all
   // change heights without a message arriving. Stay on the bottom through them.
@@ -204,13 +238,20 @@ export default function MessageTimeline({
 
       {annotated.map((message, index) => (
         <Fragment key={message.id}>
+          {message.id === firstUnreadId && (
+            <div className="my-4 flex items-center gap-3 text-metadata font-medium text-brand" role="separator" aria-label="Unread messages">
+              <span className="h-px flex-1 bg-brand/40" aria-hidden="true" />
+              <span>{unreadCount} unread messages</span>
+              <span className="h-px flex-1 bg-brand/40" aria-hidden="true" />
+            </div>
+          )}
           {message._startsDay && (
             <DaySeparator label={daySeparatorLabel(message.created_at)} />
           )}
           {/* mt-auto on the first row keeps a short conversation pinned to the
               bottom of the pane, next to the composer, rather than stranded at
               the top with a void beneath it. */}
-          <div className={index === 0 ? 'mt-auto' : message._consecutive ? 'mt-0.5' : 'mt-3'}>
+          <div data-message-id={message.id} className={index === 0 ? 'mt-auto' : message._consecutive ? 'mt-0.5' : 'mt-3'}>
             <Message
               message={message}
               viewerId={viewerId}
@@ -227,12 +268,16 @@ export default function MessageTimeline({
               onPin={onPin}
               onUnpin={onUnpin}
               onToggleReaction={onToggleReaction}
+              onOpenThread={onOpenThread}
             />
           </div>
         </Fragment>
       ))}
 
       <TypingIndicator typingUserIds={typingUserIds} members={members} />
+      <span className="sr-only" aria-live="polite" aria-atomic="true">
+        {annotated.length ? `${annotated.length} messages loaded. Latest message from ${annotated.at(-1)?.sender_name || 'a member'}.` : ''}
+      </span>
 
       {/*
         `sticky`, not `absolute`. This container is the scroll *content*, so an

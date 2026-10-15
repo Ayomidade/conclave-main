@@ -330,7 +330,7 @@ const UNREAD_COUNT_SQL = `(
   SELECT COUNT(*)
     FROM messages m
    WHERE m.room_id = rm.room_id
-     AND m.created_at > rm.last_seen_at
+     AND m.room_sequence > rm.last_seen_sequence
      AND m.deleted_at IS NULL
      AND m.sender_id <> rm.user_id
 )::int`;
@@ -368,7 +368,7 @@ async function emitChatUpdated(io, roomId) {
            FROM messages m
            INNER JOIN users u ON u.id = m.sender_id
           WHERE m.room_id = $1
-          ORDER BY m.created_at DESC, m.id DESC
+          ORDER BY m.room_sequence DESC
           LIMIT 1`,
         [roomId],
       ),

@@ -10,6 +10,7 @@ const {
   removeMember,
   setMemberRole,
   markRoomSeen,
+  updateRoomPreferences,
 } = require('../controllers/rooms.controller');
 
 const router = Router();
@@ -29,5 +30,6 @@ router.post('/:roomId/members', addMember);
 router.delete('/:roomId/members/:userId', removeMember);
 router.patch('/:roomId/members/:userId', setMemberRole);
 router.post('/:roomId/seen', markRoomSeen);
+router.patch('/:roomId/preferences', updateRoomPreferences);
 
 module.exports = router;

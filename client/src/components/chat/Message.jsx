@@ -15,6 +15,7 @@ import useLongPress from "@/hooks/useLongPress";
 const TICKS = {
   pending: { Icon: IconPending, label: 'Sending' },
   sent: { Icon: IconSent, label: 'Sent' },
+  delivered: { Icon: IconRead, label: 'Delivered' },
   read: { Icon: IconRead, label: 'Read' },
   failed: { Icon: IconFailed, label: 'Failed to send' },
 };
@@ -86,6 +87,7 @@ export default function Message({
   onPin,
   onUnpin,
   onToggleReaction,
+  onOpenThread,
 }) {
   const { isOnlineIn } = usePresence();
   const mine = message.sender_id === viewerId;
@@ -200,6 +202,7 @@ const bubbleClass = [
                 align={mine ? "end" : "start"}
                 onToggleReaction={(emoji) => onToggleReaction(message, emoji)}
                 onReply={() => onReply(message)}
+                onOpenThread={() => onOpenThread(message)}
                 onEdit={() => onEdit(message)}
                 onDelete={() => onDelete(message)}
                 onPromote={() => onPromote(message)}

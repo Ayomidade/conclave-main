@@ -1,7 +1,7 @@
 import { api } from '../lib/api';
 import { isDevAuthBypass, previewMessages, previewPinnedMessages } from '../config/devPreview';
 
-export async function listMessages(roomId, before) {
+export async function listMessages(roomId, before, afterSeq) {
   if (isDevAuthBypass) {
     return {
       messages: [...previewMessages].reverse().map((message) => ({
@@ -12,7 +12,7 @@ export async function listMessages(roomId, before) {
     };
   }
   const { data } = await api.get(`/messages/room/${roomId}`, {
-    params: before ? { before } : undefined,
+    params: afterSeq !== undefined ? { afterSeq } : before ? { before } : undefined,
   });
   return data.data;
 }

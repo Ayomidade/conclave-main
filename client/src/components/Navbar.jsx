@@ -28,11 +28,9 @@ const iconButton =
 /**
  * The header.
  *
- * Left: the sidebar button and the bell, then the page title. On chat routes the
- * header splits into the same two columns as the chat shell, so the room's own
- * header sits above the conversation instead of above the list. Below md, an
- * open room replaces the whole row with the room header (back arrow, name),
- * which is how phone messengers behave.
+ * The mobile wordmark stays left; notification and menu controls stay at the
+ * far right at every size. On chat routes the room title begins at the chat
+ * pane boundary. Below md, an open room replaces the row with its own header.
  *
  * Search lives in the chat list now, next to the thing it filters.
  *
@@ -46,7 +44,9 @@ export default function Navbar({
   menuLabel = "Open menu",
 }) {
   const { pathname } = useLocation();
-  const roomOpen = Boolean(useMatch("/chats/:roomId/*"));
+  const nestedRoomMatch = useMatch("/chats/:roomId/*");
+  const roomMatch = useMatch("/chats/:roomId");
+  const roomOpen = Boolean(nestedRoomMatch || roomMatch);
   const inChats = pathname.startsWith("/chats");
   const { unreadCount } = useNotifications();
 
@@ -56,14 +56,8 @@ export default function Navbar({
 
   return (
     <header className="border-b border-line bg-surface">
-      <nav
-        className={`grid h-16 grid-cols-1 items-center ${
-          inChats ? "md:grid-cols-[var(--list-w)_1fr]" : ""
-        }`}
-      >
-        <div
-          className={`flex min-w-0 items-center justify-between px-3 ${roomOwnsRow ? "hidden md:flex" : ""}`}
-        >
+      <nav className={`relative grid h-16 grid-cols-1 items-center ${inChats ? "md:grid-cols-[var(--list-w)_1fr]" : ""}`}>
+        <div className={`flex min-w-0 items-center justify-between px-3 ${roomOwnsRow ? "hidden md:flex" : ""}`}>
           <NavLink to="/chats" aria-label="Conclave, home" className="md:hidden">
             <img
               src={wordmarkUrl}
@@ -74,7 +68,9 @@ export default function Navbar({
             />
           </NavLink>
 
-          <div className="ml-auto flex items-center gap-1 md:ml-0">
+          {!inChats && <div className="ml-2 hidden min-w-0 flex-1 truncate text-h2 text-ink md:block">{titleFor(pathname)}</div>}
+          {inChats && <div className="hidden min-w-0 flex-1 truncate text-h2 text-ink md:block">Chats</div>}
+          <div className={`ml-auto flex items-center gap-1 ${inChats ? "md:absolute md:right-2 md:top-1/2 md:z-10 md:-translate-y-1/2" : ""}`}>
             <NavLink
               to="/notifications"
               aria-label={
@@ -101,15 +97,12 @@ export default function Navbar({
               <IconMenu className="h-6 w-6" aria-hidden="true" />
             </button>
 
-            <div className="ml-2 hidden min-w-0 flex-1 truncate text-h2 text-ink md:block">
-              {titleFor(pathname)}
-            </div>
           </div>
         </div>
 
         {inChats && (
           <div
-            className={`min-w-0 md:border-l md:border-line md:px-4 ${
+            className={`min-w-0 md:border-l md:border-line md:px-4 ${roomOwnsRow ? "md:pr-24" : ""} ${
               roomOwnsRow ? "px-3" : "hidden md:block"
             }`}
           >

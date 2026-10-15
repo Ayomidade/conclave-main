@@ -13,6 +13,7 @@ import {
   downloadAttachment,
   getAttachmentBlob,
   getCachedAttachmentBlob,
+  getAttachmentStreamUrl,
 } from '@/services/attachments.service';
 
 /**
@@ -160,11 +161,15 @@ function ImageAttachment({ attachment, tile = false }) {
           <img
             src={src}
             alt={attachment.filename}
+            width={attachment.width || undefined}
+            height={attachment.height || undefined}
+            style={attachment.width && attachment.height ? { aspectRatio: `${attachment.width} / ${attachment.height}` } : undefined}
             className={`w-full object-cover ${tile ? 'aspect-square' : 'max-h-72'}`}
           />
         ) : (
           <span
-            className={`block w-full animate-pulse bg-line ${tile ? 'aspect-square' : 'aspect-[4/3]'}`}
+            style={attachment.preview_url ? { backgroundImage: `url("${attachment.preview_url}")`, backgroundSize: 'cover', filter: 'blur(8px)' } : undefined}
+            className={`block w-full animate-pulse bg-line ${tile ? 'aspect-square' : attachment.width && attachment.height ? '' : 'aspect-[4/3]'}`}
             aria-hidden="true"
           />
         )}
@@ -201,6 +206,7 @@ function ImageAttachment({ attachment, tile = false }) {
 function VideoAttachment({ attachment, tile = false }) {
   const { toast } = useToast();
   const [blob, setBlob] = useState(null);
+  const [streamUrl, setStreamUrl] = useState(null);
   const [progress, setProgress] = useState(null);
   const [playFailed, setPlayFailed] = useState(false);
   const src = useObjectUrl(blob);
@@ -209,7 +215,9 @@ function VideoAttachment({ attachment, tile = false }) {
   useEffect(() => {
     let active = true;
     getCachedAttachmentBlob(attachment).then((cached) => {
-      if (active && cached) setBlob(cached);
+      if (!active) return;
+      if (cached) setBlob(cached);
+      else getAttachmentStreamUrl(attachment).then((result) => active && setStreamUrl(result.url)).catch(() => active && setPlayFailed(true));
     });
     return () => {
       active = false;
@@ -242,6 +250,12 @@ function VideoAttachment({ attachment, tile = false }) {
         className={`w-full bg-canvas object-cover ${tile ? 'aspect-square' : 'max-h-80 max-w-xs rounded-xl'}`}
       />
     );
+  }
+
+  if (streamUrl && !playFailed) {
+    return <video src={streamUrl} controls playsInline preload="metadata" aria-label={attachment.filename}
+      onError={() => setPlayFailed(true)}
+      className={`w-full bg-canvas object-cover ${tile ? 'aspect-square' : 'max-h-80 max-w-xs rounded-xl'}`} />;
   }
 
   return (

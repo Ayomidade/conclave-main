@@ -186,6 +186,10 @@ function streamToCloudinary(buffer, filename, resourceType) {
         filename_override: filename,
         // Folder them so the quota is easy to audit and clean up later.
         folder: 'conclave/attachments',
+        ...(resourceType === 'image' ? {
+          eager: [{ width: 32, height: 32, crop: 'fill', effect: 'blur:1000', quality: 'auto', format: 'webp' }],
+          eager_async: false,
+        } : {}),
       },
       (error, result) => {
         if (error) return reject(error);
@@ -211,6 +215,9 @@ function streamToCloudinary(buffer, filename, resourceType) {
           resourceType: result.resource_type || resourceType,
           bytes: result.bytes,
           format: result.format,
+          width: result.width || null,
+          height: result.height || null,
+          previewUrl: result.eager?.[0]?.secure_url || null,
         });
       },
     );
@@ -279,9 +286,9 @@ const uploadFile = asyncHandler(async (req, res) => {
   // insert fails rather than creating a second unclaimed record for one asset.
   try {
     await query(
-      `INSERT INTO file_uploads (uploader_id, file_url, filename, mime_type, size_bytes, public_id, resource_type)
-       VALUES ($1, $2, $3, $4, $5, $6, $7)`,
-      [req.user.id, asset.url, filename, mimetype, size, asset.publicId, asset.resourceType],
+      `INSERT INTO file_uploads (uploader_id, file_url, filename, mime_type, size_bytes, public_id, resource_type, width, height, preview_url)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`,
+      [req.user.id, asset.url, filename, mimetype, size, asset.publicId, asset.resourceType, asset.width, asset.height, asset.previewUrl],
     );
   } catch (err) {
     if (err.code === '23505') {
@@ -300,6 +307,9 @@ const uploadFile = asyncHandler(async (req, res) => {
     url: asset.url,
     mime_type: mimetype,
     size,
+    width: asset.width,
+    height: asset.height,
+    preview_url: asset.previewUrl,
   }, 201);
 });
 

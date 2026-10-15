@@ -1,6 +1,5 @@
-import { createContext, useCallback, useContext, useEffect, useMemo, useState } from 'react';
-import { MUTED_ROOMS_KEY, PINNED_ROOMS_KEY, readIdList, toggleId, writeIdList } from '@/lib/localRoomPrefs';
-import { listRooms, markRoomSeen } from '@/services/rooms.service';
+import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react';
+import { listRooms, markRoomSeen, updateRoomPreferences } from '@/services/rooms.service';
 import { useRealtime } from './RealtimeContext';
 
 const ChatsContext = createContext(null);
@@ -27,14 +26,21 @@ export function ChatsProvider({ children }) {
   const [rooms, setRooms] = useState([]);
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState('');
-  const [pinned, setPinned] = useState(() => readIdList(PINNED_ROOMS_KEY));
-  const [muted, setMuted] = useState(() => readIdList(MUTED_ROOMS_KEY));
+  const [pinned, setPinned] = useState([]);
+  const [muted, setMuted] = useState([]);
+  const [archived, setArchived] = useState([]);
+  const [typingByRoom, setTypingByRoom] = useState(new Map());
+  const typingTimers = useRef(new Map());
 
   const refresh = useCallback(async () => {
     setIsLoading(true);
     setError('');
     try {
-      setRooms(await listRooms());
+      const loaded = await listRooms();
+      setRooms(loaded);
+      setPinned(loaded.filter((room) => room.is_pinned).map((room) => room.id));
+      setMuted(loaded.filter((room) => room.is_muted).map((room) => room.id));
+      setArchived(loaded.filter((room) => room.is_archived).map((room) => room.id));
     } catch (err) {
       setError(err.response?.data?.message || 'Could not load chats.');
     } finally {
@@ -62,8 +68,51 @@ export function ChatsProvider({ children }) {
       );
     };
 
+    const onTyping = ({ roomId, userId }) => {
+      const key = `${roomId}:${userId}`;
+      clearTimeout(typingTimers.current.get(key));
+      typingTimers.current.set(key, setTimeout(() => {
+        setTypingByRoom((rows) => {
+          const next = new Map(rows);
+          const ids = new Set(next.get(roomId) || []);
+          ids.delete(userId);
+          next.set(roomId, ids);
+          return next;
+        });
+        typingTimers.current.delete(key);
+      }, 6000));
+      setTypingByRoom((current) => {
+      const next = new Map(current);
+      next.set(roomId, new Set([...(next.get(roomId) || []), userId]));
+      return next;
+      });
+    };
+    const onStopTyping = ({ roomId, userId }) => {
+      const key = `${roomId}:${userId}`;
+      clearTimeout(typingTimers.current.get(key));
+      typingTimers.current.delete(key);
+      setTypingByRoom((current) => {
+      const next = new Map(current);
+      const ids = new Set(next.get(roomId) || []);
+      ids.delete(userId);
+      next.set(roomId, ids);
+      return next;
+      });
+    };
+    const onRoomTyping = ({ roomId, typingUserIds }) => setTypingByRoom((current) => new Map(current).set(roomId, new Set(typingUserIds || [])));
+
     socket.on('chat:updated', onChatUpdated);
-    return () => socket.off('chat:updated', onChatUpdated);
+    socket.on('typing', onTyping);
+    socket.on('stop-typing', onStopTyping);
+    socket.on('room-typing', onRoomTyping);
+    return () => {
+      socket.off('chat:updated', onChatUpdated);
+      socket.off('typing', onTyping);
+      socket.off('stop-typing', onStopTyping);
+      socket.off('room-typing', onRoomTyping);
+      typingTimers.current.forEach((timer) => clearTimeout(timer));
+      typingTimers.current.clear();
+    };
   }, [socket]);
 
   /**
@@ -89,21 +138,19 @@ export function ChatsProvider({ children }) {
     [refresh],
   );
 
-  const togglePin = useCallback((roomId) => {
-    setPinned((current) => {
-      const next = toggleId(current, roomId);
-      writeIdList(PINNED_ROOMS_KEY, next);
-      return next;
-    });
-  }, []);
+  const togglePreference = useCallback(async (roomId, key, setter, current) => {
+    const value = !current.includes(roomId);
+    setter((rows) => value ? [...rows, roomId] : rows.filter((id) => id !== roomId));
+    try {
+      await updateRoomPreferences(roomId, { [key]: value });
+      setRooms((rows) => rows.map((room) => room.id === roomId ? { ...room, [`is_${key}`]: value } : room));
+    } catch { refresh(); }
+  }, [refresh]);
 
-  const toggleMute = useCallback((roomId) => {
-    setMuted((current) => {
-      const next = toggleId(current, roomId);
-      writeIdList(MUTED_ROOMS_KEY, next);
-      return next;
-    });
-  }, []);
+  const togglePin = useCallback((roomId) => togglePreference(roomId, 'pinned', setPinned, pinned), [togglePreference, pinned]);
+
+  const toggleMute = useCallback((roomId) => togglePreference(roomId, 'muted', setMuted, muted), [togglePreference, muted]);
+  const toggleArchive = useCallback((roomId) => togglePreference(roomId, 'archived', setArchived, archived), [togglePreference, archived]);
 
   const sortedRooms = useMemo(() => {
     const recency = (room) => room.last_message?.created_at || '';
@@ -133,20 +180,30 @@ export function ChatsProvider({ children }) {
     [rooms, muted],
   );
 
+  useEffect(() => {
+    if (typeof navigator === 'undefined') return;
+    if (unreadTotal > 0) navigator.setAppBadge?.(unreadTotal).catch?.(() => {});
+    else navigator.clearAppBadge?.().catch?.(() => {});
+  }, [unreadTotal]);
+
   const value = useMemo(
     () => ({
       rooms: sortedRooms,
+      archivedRooms: rooms.filter((room) => archived.includes(room.id)),
       isLoading,
       error,
       unreadTotal,
       pinned,
       muted,
+      archived,
+      typingByRoom,
       refresh,
       markSeen,
       togglePin,
       toggleMute,
+      toggleArchive,
     }),
-    [sortedRooms, isLoading, error, unreadTotal, pinned, muted, refresh, markSeen, togglePin, toggleMute],
+    [sortedRooms, rooms, archived, typingByRoom, isLoading, error, unreadTotal, pinned, muted, refresh, markSeen, togglePin, toggleMute, toggleArchive],
   );
 
   return <ChatsContext.Provider value={value}>{children}</ChatsContext.Provider>;

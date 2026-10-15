@@ -12,6 +12,12 @@ export async function listRooms() {
   return data.data;
 }
 
+export async function updateRoomPreferences(roomId, updates) {
+  if (isDevAuthBypass) return updates;
+  const { data } = await api.patch(`/rooms/${roomId}/preferences`, updates);
+  return data.data;
+}
+
 export async function getRoom(roomId) {
   if (isDevAuthBypass) {
     const found = previewRooms.find((room) => room.id === roomId);

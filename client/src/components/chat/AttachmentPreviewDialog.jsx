@@ -136,6 +136,8 @@ export default function AttachmentPreviewDialog({
               playsInline
               className="max-h-full max-w-full rounded-lg"
             />
+          ) : active?.type?.startsWith('audio/') && urls[index] ? (
+            <audio src={urls[index]} controls className="w-full max-w-md" aria-label={active.name} />
           ) : (
             <div className="flex max-w-xs flex-col items-center gap-3 text-center">
               <span className="grid h-20 w-20 place-items-center rounded-2xl bg-brand-soft text-brand">

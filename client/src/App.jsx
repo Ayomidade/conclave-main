@@ -8,20 +8,21 @@ import { AuthProvider, useAuth } from './contexts/AuthContext';
 import { RealtimeProvider } from './contexts/RealtimeContext';
 import { ThemeProvider } from './contexts/ThemeContext';
 import { ToastProvider } from './contexts/ToastContext';
-import CatchUpDigestPage from './pages/CatchUpDigestPage';
-import Chats from './pages/Chats';
-import Decisions from './pages/Decisions';
-import DecisionDetail from './pages/DecisionDetail';
-import Login from './pages/Login';
-import NewChat from './pages/NewChat';
-import Notifications from './pages/Notifications';
-import Profile from './pages/Profile';
-import Register from './pages/Register';
-import Room from './pages/Room';
-import RoomInfo from './pages/RoomInfo';
-import Settings from './pages/Settings';
 import StaticPage from './pages/StaticPage';
-import Tasks from './pages/Tasks';
+
+const CatchUpDigestPage = lazy(() => import('./pages/CatchUpDigestPage'));
+const Chats = lazy(() => import('./pages/Chats'));
+const Decisions = lazy(() => import('./pages/Decisions'));
+const DecisionDetail = lazy(() => import('./pages/DecisionDetail'));
+const Login = lazy(() => import('./pages/Login'));
+const NewChat = lazy(() => import('./pages/NewChat'));
+const Notifications = lazy(() => import('./pages/Notifications'));
+const Profile = lazy(() => import('./pages/Profile'));
+const Register = lazy(() => import('./pages/Register'));
+const Room = lazy(() => import('./pages/Room'));
+const RoomInfo = lazy(() => import('./pages/RoomInfo'));
+const Settings = lazy(() => import('./pages/Settings'));
+const Tasks = lazy(() => import('./pages/Tasks'));
 
 // Lazy because Landing statically imports GSAP, and GSAP is landing-only. A
 // signed-in user going to the chat list must never download it, so it rides
@@ -61,6 +62,7 @@ export default function App() {
       <ToastProvider>
         <AuthProvider>
           <RealtimeProvider>
+            <Suspense fallback={<Spinner fullPage label="Loading" />}>
             <Routes>
               <Route path="/" element={<LandingRoute />} />
 
@@ -110,6 +112,7 @@ export default function App() {
 
               <Route path="*" element={<Navigate to="/" replace />} />
             </Routes>
+            </Suspense>
           </RealtimeProvider>
         </AuthProvider>
       </ToastProvider>

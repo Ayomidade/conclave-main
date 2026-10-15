@@ -35,10 +35,13 @@ function open() {
     return Promise.reject(new Error("IndexedDB unavailable"));
   if (!dbPromise) {
     dbPromise = new Promise((resolve, reject) => {
-      const request = indexedDB.open(DB_NAME, 1);
+      const request = indexedDB.open(DB_NAME, 2);
       request.onupgradeneeded = () => {
-        request.result.createObjectStore("files", { keyPath: "key" });
-        request.result.createObjectStore("meta", { keyPath: "key" });
+        const db = request.result;
+        if (!db.objectStoreNames.contains("files")) db.createObjectStore("files", { keyPath: "key" });
+        if (!db.objectStoreNames.contains("meta")) db.createObjectStore("meta", { keyPath: "key" });
+        if (!db.objectStoreNames.contains("roomMessages")) db.createObjectStore("roomMessages", { keyPath: "key" });
+        if (!db.objectStoreNames.contains("outbox")) db.createObjectStore("outbox", { keyPath: "key" });
       };
       request.onsuccess = () => resolve(request.result);
       request.onerror = () => {
@@ -161,4 +164,52 @@ export async function clearLocalFiles() {
   } catch {
     // Nothing stored, or storage unavailable.
   }
+}
+
+export async function clearLocalData() {
+  try {
+    await transact(["files", "meta", "roomMessages", "outbox"], "readwrite", (t) => {
+      t.objectStore("files").clear();
+      t.objectStore("meta").clear();
+      t.objectStore("roomMessages").clear();
+      t.objectStore("outbox").clear();
+    });
+  } catch { /* local state is already unavailable */ }
+}
+
+export async function readRoomMessages(userId, roomId) {
+  if (!userId || !roomId) return [];
+  try {
+    return (await transact(["roomMessages"], "readonly", (t) =>
+      t.objectStore("roomMessages").get(`${userId}:${roomId}`),
+    ))?.messages || [];
+  } catch { return []; }
+}
+
+export async function saveRoomMessages(userId, roomId, messages) {
+  if (!userId || !roomId) return;
+  try {
+    await transact(["roomMessages"], "readwrite", (t) => t.objectStore("roomMessages").put({
+      key: `${userId}:${roomId}`, messages: messages.slice(-200), savedAt: Date.now(),
+    }));
+  } catch { /* local history is a best-effort cache */ }
+}
+
+export async function listOutbox(userId, roomId) {
+  if (!userId) return [];
+  try {
+    const rows = await transact(["outbox"], "readonly", (t) => t.objectStore("outbox").getAll());
+    return rows
+      .filter((row) => row.userId === userId && (!roomId || row.roomId === roomId))
+      .sort((a, b) => (a.createdAt || 0) - (b.createdAt || 0));
+  } catch { return []; }
+}
+
+export async function putOutbox(item) {
+  if (!item?.key) return;
+  try { await transact(["outbox"], "readwrite", (t) => t.objectStore("outbox").put(item)); } catch { /* retry is best effort if storage is blocked */ }
+}
+
+export async function deleteOutbox(key) {
+  try { await transact(["outbox"], "readwrite", (t) => t.objectStore("outbox").delete(key)); } catch { /* already removed */ }
 }

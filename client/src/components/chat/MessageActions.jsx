@@ -11,6 +11,7 @@ import IconPin from '@/assets/icons/pin.svg?react';
 import IconReply from '@/assets/icons/reply.svg?react';
 import IconStar from '@/assets/icons/star.svg?react';
 import IconTasks from '@/assets/icons/tasks.svg?react';
+import IconThread from '@/assets/icons/thread.svg?react';
 import PopoverMenu from '@/components/ui/PopoverMenu';
 import { REACTION_EMOJI } from "@/lib/messageMeta";
 
@@ -67,6 +68,7 @@ export default function MessageActions({
   onFlagTask,
   onPin,
   onUnpin,
+  onOpenThread,
 }) {
   const triggerRef = useRef(null);
   const setOpen = (value) =>
@@ -99,6 +101,7 @@ export default function MessageActions({
   const mayUnpinRoom = holdsRoomPin || isAdmin;
 
   const items = [
+    { key: "thread", label: "Open thread", Icon: IconThread, onClick: onOpenThread },
     { key: "reply", label: "Reply", Icon: IconReply, onClick: onReply },
     message.content && {
       key: "copy",

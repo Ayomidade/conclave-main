@@ -80,7 +80,7 @@ const getRoomDigest = asyncHandler(async (req, res) => {
        AND mm.user_id = $3
        AND m.sender_id != $3
        AND m.deleted_at IS NULL
-     ORDER BY m.created_at DESC
+     ORDER BY m.room_sequence DESC
      LIMIT 20`,
     [roomId, lastSeenAt, req.user.id],
   );
@@ -251,7 +251,7 @@ const getUserDigest = asyncHandler(async (req, res) => {
        AND m.sender_id != $2
        AND m.deleted_at IS NULL
        AND m.created_at > rm.digest_seen_at
-     ORDER BY m.created_at DESC
+     ORDER BY m.room_sequence DESC
      LIMIT 50`,
     [roomIds, req.user.id],
   );

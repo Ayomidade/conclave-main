@@ -1,5 +1,6 @@
 import { api } from "../lib/api";
 import { readLocalFile, saveLocalFile } from "../lib/fileCache";
+import { getMediaPreferences } from "../lib/mediaPreferences";
 
 /**
  * Fetching an attachment.
@@ -46,6 +47,14 @@ async function fetchFromServer(attachment, onProgress) {
   }
 }
 
+function shouldCacheAttachment(attachment) {
+  const preferences = getMediaPreferences();
+  const type = attachment.mime_type || '';
+  if (type.startsWith('image/')) return preferences.images;
+  if (type.startsWith('video/')) return preferences.video;
+  return preferences.documents;
+}
+
 // One request per attachment at a time, however many components ask for it.
 const inflight = new Map();
 
@@ -71,7 +80,7 @@ export function getAttachmentBlob(attachment, { onProgress } = {}) {
     if (local) return local;
 
     const blob = await fetchFromServer(attachment, emit);
-    if (attachment.url) {
+    if (attachment.url && shouldCacheAttachment(attachment)) {
       saveLocalFile(attachment.url, blob, {
         filename: attachment.filename,
         mime: attachment.mime_type,
@@ -87,6 +96,11 @@ export function getAttachmentBlob(attachment, { onProgress } = {}) {
 /** The copy already on this device, or null. Never touches the network. */
 export function getCachedAttachmentBlob(attachment) {
   return readLocalFile(attachment.url);
+}
+
+export async function getAttachmentStreamUrl(attachment) {
+  const { data } = await api.get(`/attachments/${attachment.id}/url`);
+  return data.data;
 }
 
 /**

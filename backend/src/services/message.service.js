@@ -55,6 +55,9 @@ function serializeAttachment(row) {
     size: row.size_bytes,
     mime_type: row.file_type,
     url: row.file_url,
+    width: row.width,
+    height: row.height,
+    preview_url: row.preview_url,
   };
 }
 
@@ -78,7 +81,10 @@ function serializeAttachment(row) {
  *   without it the mentions simply are not pushed live.
  * @returns {object} The inserted message row enriched with sender info and attachments
  */
-async function createMessage({ roomId, senderId, content, replyToId, attachments, mentionedUserIds, inTransaction, io }) {
+async function createMessage({ roomId, senderId, clientId, content, replyToId, attachments, mentionedUserIds, inTransaction, io }) {
+  if (clientId && !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(clientId)) {
+    throw new ApiError(400, 'clientId must be a UUID');
+  }
   const cleanAttachments = validateAttachments(attachments);
   const hasContent = typeof content === 'string' && content.trim().length > 0;
 
@@ -117,7 +123,7 @@ async function createMessage({ roomId, senderId, content, replyToId, attachments
 
   // 3. Work out who is mentioned, before the insert, so the rows can be written
   //    in the same transaction as the message.
-  const mentionedIds = await resolveMentionIds({
+  let mentionedIds = await resolveMentionIds({
     roomId, senderId, content, mentionedUserIds,
   });
 
@@ -125,24 +131,51 @@ async function createMessage({ roomId, senderId, content, replyToId, attachments
   const client = await pool.connect();
   let message;
   let savedAttachments = [];
+  let isRetry = false;
 
   try {
     await client.query('BEGIN');
+    // Serialize sends per room. A retry must check for an existing client id
+    // after any in-flight copy has committed, before allocating a sequence.
+    await client.query('SELECT id FROM rooms WHERE id = $1 FOR UPDATE', [roomId]);
 
-    const result = await client.query(
-      `INSERT INTO messages (room_id, sender_id, content, reply_to_id)
-       VALUES ($1, $2, $3, $4)
-       RETURNING
-         id, room_id, sender_id, content, reply_to_id,
-         edited_at, deleted_at, created_at`,
-      [roomId, senderId, hasContent ? content.trim() : null, replyToId || null],
-    );
-    message = result.rows[0];
+    if (clientId) {
+      const existing = await client.query(
+        `SELECT id, room_id, sender_id, client_id, room_sequence, content, reply_to_id,
+                edited_at, deleted_at, created_at
+           FROM messages WHERE room_id = $1 AND sender_id = $2 AND client_id = $3`,
+        [roomId, senderId, clientId],
+      );
+      if (existing.rows.length) {
+        message = existing.rows[0];
+        isRetry = true;
+        const attachmentRows = await client.query(
+          `SELECT id, filename, file_url, file_type, size_bytes, width, height, preview_url FROM attachments WHERE message_id = $1`,
+          [message.id],
+        );
+        savedAttachments = attachmentRows.rows;
+      }
+    }
+
+    if (!isRetry) {
+      const sequence = await client.query(
+        `UPDATE rooms SET message_sequence = message_sequence + 1 WHERE id = $1 RETURNING message_sequence`,
+        [roomId],
+      );
+
+      const result = await client.query(
+        `INSERT INTO messages (room_id, sender_id, client_id, room_sequence, content, reply_to_id)
+         VALUES ($1, $2, $3, $4, $5, $6)
+         RETURNING id, room_id, sender_id, client_id, room_sequence, content, reply_to_id,
+                   edited_at, deleted_at, created_at`,
+        [roomId, senderId, clientId || null, sequence.rows[0].message_sequence, hasContent ? content.trim() : null, replyToId || null],
+      );
+      message = result.rows[0];
 
     // Lets a caller write rows that must live or die with the message, such as
     // a poll and its options, inside the same transaction. Runs before the
     // attachment claim so a rejected poll rolls the message back too.
-    if (inTransaction) await inTransaction(client, message);
+    if (inTransaction && !isRetry) await inTransaction(client, message);
 
     // Claim each upload before inserting its attachment row. One statement does
     // the lookup, the ownership check and the one-time-use check: the
@@ -153,14 +186,14 @@ async function createMessage({ roomId, senderId, content, replyToId, attachments
     // belongs to somebody else, or it is already attached — and the client
     // cannot tell which from outside. All three are the same failure here, so
     // they share one message and the transaction rolls back.
-    for (const url of cleanAttachments) {
+    for (const url of isRetry ? [] : cleanAttachments) {
       const claim = await client.query(
         `UPDATE file_uploads
             SET attached_message_id = $2
           WHERE file_url = $1
             AND uploader_id = $3
             AND attached_message_id IS NULL
-          RETURNING filename, mime_type, size_bytes, public_id, resource_type`,
+          RETURNING filename, mime_type, size_bytes, public_id, resource_type, width, height, preview_url`,
         [url, message.id, senderId],
       );
 
@@ -182,9 +215,9 @@ async function createMessage({ roomId, senderId, content, replyToId, attachments
       // to parsing file_url for those, which is worse but not broken.
       const owned = claim.rows[0];
       const attResult = await client.query(
-        `INSERT INTO attachments (message_id, filename, file_url, file_type, size_bytes, public_id, resource_type)
-         VALUES ($1, $2, $3, $4, $5, $6, $7)
-         RETURNING id, filename, file_url, file_type, size_bytes`,
+        `INSERT INTO attachments (message_id, filename, file_url, file_type, size_bytes, public_id, resource_type, width, height, preview_url)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+         RETURNING id, filename, file_url, file_type, size_bytes, width, height, preview_url`,
         [
           message.id,
           owned.filename,
@@ -193,12 +226,15 @@ async function createMessage({ roomId, senderId, content, replyToId, attachments
           owned.size_bytes ?? null,
           owned.public_id ?? null,
           owned.resource_type ?? null,
+          owned.width ?? null,
+          owned.height ?? null,
+          owned.preview_url ?? null,
         ],
       );
       savedAttachments.push(attResult.rows[0]);
     }
 
-    for (const mentionedId of mentionedIds) {
+    for (const mentionedId of isRetry ? [] : mentionedIds) {
       await client.query(
         `INSERT INTO message_mentions (message_id, user_id)
          VALUES ($1, $2)
@@ -207,6 +243,15 @@ async function createMessage({ roomId, senderId, content, replyToId, attachments
          ON CONFLICT DO NOTHING`,
         [message.id, mentionedId],
       );
+    }
+
+    if (isRetry) {
+      const existingMentions = await client.query(
+        `SELECT user_id FROM message_mentions WHERE message_id = $1`,
+        [message.id],
+      );
+      mentionedIds = existingMentions.rows.map((row) => row.user_id);
+    }
     }
 
     await client.query('COMMIT');
@@ -241,8 +286,10 @@ async function createMessage({ roomId, senderId, content, replyToId, attachments
   //    the user's actual intent and is already durable at this point, so losing a
   //    bell entry is strictly better than reporting a failed send for a message
   //    that exists.
-  await notifyMentions({ message, mentionedIds, senderId, io });
-  await notifyRoomActivity({ message, senderId, mentionedIds, io });
+  if (!isRetry) {
+    await notifyMentions({ message, mentionedIds, senderId, io });
+    await notifyRoomActivity({ message, senderId, mentionedIds, io });
+  }
 
   // 8. Refresh every member's chat-list row. Last, and after the commit, so the
   //    preview and the unread badge read the same data anyone else would.
@@ -255,12 +302,14 @@ async function createMessage({ roomId, senderId, content, replyToId, attachments
   // none, so this is always [].
   const [payload] = await attachPolls(await attachPins(await attachReactions([{
     ...message,
+    client_id: message.client_id || clientId || null,
     sender_name: sender.rows[0]?.display_name || null,
     sender_avatar: sender.rows[0]?.avatar_url || null,
     attachments: savedAttachments.map(serializeAttachment),
     // Exposed so the client can style a real mention rather than regex-matching
     // the text, and so a client can learn which ids a send actually resolved to.
     mentioned_user_ids: mentionedIds,
+    _idempotentRetry: isRetry,
   }], senderId), senderId));
 
   return payload;

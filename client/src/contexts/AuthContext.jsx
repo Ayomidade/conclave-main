@@ -1,7 +1,7 @@
 import { createContext, useContext, useEffect, useMemo, useState } from "react";
 import { isDevAuthBypass, previewUser } from "../config/devPreview";
 import * as authService from "../services/auth.service";
-import { clearLocalFiles } from "../lib/fileCache";
+import { clearLocalData } from "../lib/fileCache";
 import { deleteAccount as deleteAccountRequest, updateProfile as updateProfileRequest } from "../services/users.service";
 
 const AuthContext = createContext(null);
@@ -11,7 +11,7 @@ export function AuthProvider({ children }) {
   const [isLoading, setIsLoading] = useState(!isDevAuthBypass);
   useEffect(() => {
     if (isDevAuthBypass) return;
-    const endSession = () => setUser(null);
+    const endSession = () => { clearLocalData(); setUser(null); };
     window.addEventListener('conclave:session-ended', endSession);
     return () => window.removeEventListener('conclave:session-ended', endSession);
   }, []);
@@ -59,7 +59,7 @@ export function AuthProvider({ children }) {
       return;
     }
     await authService.logout();
-    await clearLocalFiles();
+    await clearLocalData();
     setUser(null);
   }
   // Editing the profile has to land here, not only on the Profile page. The rail
@@ -76,6 +76,7 @@ export function AuthProvider({ children }) {
   // 401s on every request until the next reload.
   async function deleteAccount() {
     await deleteAccountRequest();
+    await clearLocalData();
     setUser(null);
   }
   const value = useMemo(
