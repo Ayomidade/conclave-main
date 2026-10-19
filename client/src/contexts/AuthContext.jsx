@@ -1,15 +1,17 @@
 import { createContext, useContext, useEffect, useMemo, useState } from "react";
 import { isDevAuthBypass, previewUser } from "../config/devPreview";
 import * as authService from "../services/auth.service";
-import { clearLocalFiles } from "../services/attachments.service";
+import { clearLocalData } from "../lib/fileCache";
 import { deleteAccount as deleteAccountRequest, updateProfile as updateProfileRequest } from "../services/users.service";
+
 const AuthContext = createContext(null);
+
 export function AuthProvider({ children }) {
   const [user, setUser] = useState(isDevAuthBypass ? previewUser : null);
   const [isLoading, setIsLoading] = useState(!isDevAuthBypass);
   useEffect(() => {
     if (isDevAuthBypass) return;
-    const endSession = () => setUser(null);
+    const endSession = () => { clearLocalData(); setUser(null); };
     window.addEventListener('conclave:session-ended', endSession);
     return () => window.removeEventListener('conclave:session-ended', endSession);
   }, []);
@@ -51,16 +53,13 @@ export function AuthProvider({ children }) {
     const session = await authService.register(values);
     setUser(session.user);
   }
-  async function logout() {
+    async function logout() {
     if (isDevAuthBypass) {
       setUser(previewUser);
       return;
     }
     await authService.logout();
-    // After the server call, not before: if signing out fails the files are
-    // still the signed-in user's, and clearing them first would destroy the
-    // cache of a session that just refused to end.
-    await clearLocalFiles();
+    await clearLocalData();
     setUser(null);
   }
   // Editing the profile has to land here, not only on the Profile page. The rail
@@ -77,6 +76,7 @@ export function AuthProvider({ children }) {
   // 401s on every request until the next reload.
   async function deleteAccount() {
     await deleteAccountRequest();
+    await clearLocalData();
     setUser(null);
   }
   const value = useMemo(

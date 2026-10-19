@@ -1,5 +1,6 @@
 const { Router } = require('express');
 const requireAuth = require('../middlewares/auth.middleware');
+const rateLimit = require('../middlewares/rateLimit.middleware');
 const validateUuidParams = require('../middlewares/validateParams');
 const {
   sendMessage,
@@ -18,7 +19,7 @@ const router = Router();
 
 router.use(requireAuth);
 router.use(validateUuidParams);
-router.post('/', sendMessage);
+router.post('/', rateLimit({ max: 30 }), sendMessage);
 router.get('/room/:roomId', listMessages);
 router.get('/room/:roomId/search', searchMessages);
 // Registered after the two room routes above so `/room/:roomId/pinned` is not

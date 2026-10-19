@@ -232,6 +232,10 @@ const listRooms = asyncHandler(async (req, res) => {
        rm.role AS my_role,
        rm.joined_at,
        rm.last_seen_at,
+       rm.last_seen_sequence,
+       COALESCE(rmp.pinned, FALSE) AS is_pinned,
+       COALESCE(rmp.muted, FALSE) AS is_muted,
+       COALESCE(rmp.archived, FALSE) AS is_archived,
        (SELECT COUNT(*) FROM room_members am WHERE am.room_id = r.id)::int
          AS member_count,
 
@@ -274,6 +278,8 @@ const listRooms = asyncHandler(async (req, res) => {
            'sender_id',      lm.sender_id,
            'sender_name',    lm.sender_name,
            'sender_avatar',  lm.sender_avatar,
+           'room_sequence',  lm.room_sequence,
+           'has_mention',    lm.has_mention,
            'has_attachment', lm.has_attachment,
            'is_deleted',     lm.deleted_at IS NOT NULL,
            'created_at',     lm.created_at
@@ -291,16 +297,19 @@ const listRooms = asyncHandler(async (req, res) => {
      INNER JOIN room_members rm
        ON rm.room_id = r.id
       AND rm.user_id = $1
+     LEFT JOIN room_member_preferences rmp ON rmp.room_id = r.id AND rmp.user_id = $1
      LEFT JOIN LATERAL (
-       SELECT m.id, m.content, m.sender_id, m.created_at, m.deleted_at,
+       SELECT m.id, m.content, m.sender_id, m.created_at, m.deleted_at, m.room_sequence,
               u.display_name AS sender_name,
               u.avatar_url   AS sender_avatar,
               EXISTS (SELECT 1 FROM attachments a WHERE a.message_id = m.id)
-                AS has_attachment
+                AS has_attachment,
+              EXISTS (SELECT 1 FROM message_mentions mm WHERE mm.message_id = m.id AND mm.user_id = $1)
+                AS has_mention
          FROM messages m
          INNER JOIN users u ON u.id = m.sender_id
         WHERE m.room_id = r.id
-        ORDER BY m.created_at DESC, m.id DESC
+        ORDER BY m.room_sequence DESC
         LIMIT 1
      ) lm ON TRUE
      ORDER BY COALESCE(lm.created_at, r.created_at) DESC, r.id DESC`,
@@ -308,6 +317,30 @@ const listRooms = asyncHandler(async (req, res) => {
   );
 
   return ok(res, result.rows);
+});
+
+const updateRoomPreferences = asyncHandler(async (req, res) => {
+  const { roomId } = req.params;
+  const allowed = ['pinned', 'muted', 'archived'];
+  const updates = Object.fromEntries(Object.entries(req.body || {}).filter(([key]) => allowed.includes(key)));
+  if (!Object.keys(updates).length || Object.values(updates).some((value) => typeof value !== 'boolean')) {
+    throw new ApiError(400, 'Provide pinned, muted, or archived as a boolean');
+  }
+  const membership = await query('SELECT 1 FROM room_members WHERE room_id = $1 AND user_id = $2', [roomId, req.user.id]);
+  if (!membership.rows.length) throw new ApiError(404, 'Room not found');
+  const values = [roomId, req.user.id, updates.pinned ?? false, updates.muted ?? false, updates.archived ?? false];
+  const result = await query(
+    `INSERT INTO room_member_preferences (room_id, user_id, pinned, muted, archived)
+     VALUES ($1, $2, $3, $4, $5)
+     ON CONFLICT (room_id, user_id) DO UPDATE SET
+       pinned = CASE WHEN $6::boolean THEN $3 ELSE room_member_preferences.pinned END,
+       muted = CASE WHEN $7::boolean THEN $4 ELSE room_member_preferences.muted END,
+       archived = CASE WHEN $8::boolean THEN $5 ELSE room_member_preferences.archived END,
+       updated_at = NOW()
+     RETURNING pinned, muted, archived`,
+    [...values, 'pinned' in updates, 'muted' in updates, 'archived' in updates],
+  );
+  return ok(res, result.rows[0]);
 });
 
 // ---------- getRoom ----------
@@ -355,7 +388,9 @@ const getRoom = asyncHandler(async (req, res) => {
                'avatar_url', u.avatar_url,
                'role', rm2.role,
                'joined_at', rm2.joined_at,
-               'last_seen_at', rm2.last_seen_at
+               'last_seen_at', rm2.last_seen_at,
+               'last_seen_sequence', rm2.last_seen_sequence,
+               'last_delivered_sequence', rm2.last_delivered_sequence
              )
              ORDER BY rm2.role = 'admin' DESC,
                       rm2.joined_at ASC,
@@ -533,9 +568,10 @@ const markRoomSeen = asyncHandler(async (req, res) => {
 
   const result = await query(
     `UPDATE room_members
-        SET last_seen_at = NOW()
+        SET last_seen_at = NOW(),
+            last_seen_sequence = COALESCE((SELECT MAX(room_sequence) FROM messages WHERE room_id = $1), last_seen_sequence)
       WHERE room_id = $1 AND user_id = $2
-      RETURNING last_seen_at`,
+      RETURNING last_seen_at, last_seen_sequence`,
     [roomId, req.user.id],
   );
 
@@ -546,7 +582,10 @@ const markRoomSeen = asyncHandler(async (req, res) => {
   const lastSeenAt = result.rows[0].last_seen_at;
 
   const io = req.app.get('io');
-  if (io) io.to(roomId).emit('room-seen', { roomId, userId: req.user.id, lastSeenAt });
+  if (io) io.to(roomId).emit('room-seen', {
+    roomId, userId: req.user.id, lastSeenAt,
+    lastSeenSequence: result.rows[0].last_seen_sequence,
+  });
 
   return ok(res, { roomId, lastSeenAt });
 });
@@ -763,4 +802,5 @@ module.exports = {
   removeMember,
   setMemberRole,
   markRoomSeen,
+  updateRoomPreferences,
 };

@@ -1,7 +1,7 @@
 import { api } from '../lib/api';
 import { isDevAuthBypass, previewMessages, previewPinnedMessages } from '../config/devPreview';
 
-export async function listMessages(roomId, before) {
+export async function listMessages(roomId, before, afterSeq) {
   if (isDevAuthBypass) {
     return {
       messages: [...previewMessages].reverse().map((message) => ({
@@ -12,7 +12,7 @@ export async function listMessages(roomId, before) {
     };
   }
   const { data } = await api.get(`/messages/room/${roomId}`, {
-    params: before ? { before } : undefined,
+    params: afterSeq !== undefined ? { afterSeq } : before ? { before } : undefined,
   });
   return data.data;
 }
@@ -77,10 +77,15 @@ export async function removeReaction(messageId, emoji) {
  * read back from the upload record so a client cannot claim its own file is a
  * different size or type than the bytes it just sent.
  */
-export async function uploadFile(file) {
+export async function uploadFile(file, { onProgress, signal } = {}) {
   const form = new FormData();
   form.append('file', file);
-  const { data } = await api.post('/upload', form);
+  const { data } = await api.post('/upload', form, {
+    signal,
+    onUploadProgress: (event) => {
+      if (event.total) onProgress?.(event.loaded / event.total);
+    },
+  });
   return data.data;
 }
 

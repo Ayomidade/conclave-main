@@ -16,10 +16,8 @@ import { DOCUMENT_ACCEPT, PHOTO_ACCEPT } from '@/lib/media';
  * popover on wider screens.
  *
  * Photos and Camera hand files over flagged for compression; Document keeps the
- * original bytes. The flag is carried into the send-preview flow, which is
- * where compressing would happen — it is not applied yet, so it is passed
- * through and ignored. Poll, Decision and Task are optional, and each appears
- * only when its handler is supplied.
+ * original bytes. Poll, Decision and Task are optional, and each appears only
+ * when its handler is supplied.
  *
  * The desktop menu opens upward, because the trigger sits at the bottom of the
  * pane: `side="bottom"` would clamp immediately against the viewport edge and

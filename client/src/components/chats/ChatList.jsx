@@ -23,7 +23,7 @@ import ChatRow from './ChatRow';
  * someone is a member of is how a message goes unread for a month.
  */
 export default function ChatList() {
-  const { rooms, isLoading, error } = useChats();
+  const { rooms, archivedRooms, isLoading, error } = useChats();
   // Both the chip and the search field write to the URL, so reading them here
   // keeps one source of truth and lets a filtered view be linked to directly.
   const [params] = useSearchParams();
@@ -31,7 +31,7 @@ export default function ChatList() {
   const query = params.get('q') || '';
 
   const visibleRooms = useMemo(() => {
-    let list = rooms;
+    let list = filter === 'archived' ? archivedRooms : rooms.filter((room) => !room.is_archived);
 
     if (filter === 'unread') list = list.filter((room) => (room.unread_count || 0) > 0);
     else if (filter === 'groups') list = list.filter((room) => room.type !== 'dm');
@@ -43,7 +43,7 @@ export default function ChatList() {
     }
 
     return list;
-  }, [rooms, filter, query]);
+  }, [rooms, archivedRooms, filter, query]);
 
   const filtered = Boolean(filter || query.trim());
 

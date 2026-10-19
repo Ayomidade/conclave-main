@@ -12,7 +12,7 @@
  */
 export default function Tabs({ tabs, value, onChange, ariaLabel, className = '' }) {
   return (
-    <div role="tablist" aria-label={ariaLabel} className={`flex gap-1 overflow-x-auto border-b border-line ${className}`}>
+    <div role="tablist" aria-label={ariaLabel} className={`scrollbar-none flex gap-1 overflow-x-auto border-b border-line ${className}`}>
       {tabs.map((tab) => {
         const selected = tab.value === value;
         return (

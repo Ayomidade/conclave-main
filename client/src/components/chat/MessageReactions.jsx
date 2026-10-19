@@ -30,7 +30,6 @@ export default function MessageReactions({ message, onToggle }) {
   if (!reactions.length) return null;
 
   return (
-    // ...the rest stays exactly as it is
     <div className="relative flex flex-wrap items-center gap-1.5">
       {reactions.map((reaction) => (
         <button

@@ -1,22 +1,31 @@
-import { useEffect, useState } from 'react';
-import { Link, useNavigate, useOutletContext, useSearchParams } from 'react-router-dom';
-import IconPin from '@/assets/icons/pin.svg?react';
-import IconStar from '@/assets/icons/star.svg?react';
-import Button from '@/components/ui/Button';
-import EmptyState from '@/components/ui/EmptyState';
-import Spinner from '@/components/ui/Spinner';
-import { listDecisions, searchDecisions } from '@/services/decisions.service';
-import Page from '@/components/layout/Page';
+import { useEffect, useState } from "react";
+import {
+  Link,
+  useNavigate,
+  useOutletContext,
+  useSearchParams,
+} from "react-router-dom";
+import IconPin from "@/assets/icons/pin.svg?react";
+import IconStar from "@/assets/icons/star.svg?react";
+import Button from "@/components/ui/Button";
+import EmptyState from "@/components/ui/EmptyState";
+import Spinner from "@/components/ui/Spinner";
+import { listDecisions, searchDecisions } from "@/services/decisions.service";
+import Page from "@/components/layout/Page";
 
 function formatDate(value) {
   const date = new Date(value);
-  if (Number.isNaN(date.getTime())) return '';
-  return date.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
+  if (Number.isNaN(date.getTime())) return "";
+  return date.toLocaleDateString("en-US", {
+    month: "short",
+    day: "numeric",
+    year: "numeric",
+  });
 }
 
 function DecisionCard({ decision }) {
   const isRoomPinned = Boolean(decision.pins?.room);
-  const isBookmarked = (decision.pins?.mine || []).includes('user');
+  const isBookmarked = (decision.pins?.mine || []).includes("user");
 
   return (
     <article className="rounded-xl border border-line bg-surface px-5 pt-18 pb-[21px]">
@@ -82,19 +91,19 @@ export default function Decisions() {
   const [params, setParams] = useSearchParams();
   const [decisions, setDecisions] = useState([]);
   const [isLoading, setIsLoading] = useState(true);
-  const [error, setError] = useState('');
+  const [error, setError] = useState("");
 
-  const query = params.get('q') || '';
+  const query = params.get("q") || "";
 
   useEffect(() => {
-    setRoomHeader('Decisions');
+    setRoomHeader("Decisions");
     return () => setRoomHeader(null);
   }, [setRoomHeader]);
 
   useEffect(() => {
     let active = true;
     setIsLoading(true);
-    setError('');
+    setError("");
 
     const request = query.trim()
       ? searchDecisions(query.trim()).then((rows) => rows)
@@ -105,7 +114,8 @@ export default function Decisions() {
         if (active) setDecisions(rows);
       })
       .catch((err) => {
-        if (active) setError(err.response?.data?.message || 'Could not load decisions.');
+        if (active)
+          setError(err.response?.data?.message || "Could not load decisions.");
       })
       .finally(() => {
         if (active) setIsLoading(false);
@@ -118,14 +128,14 @@ export default function Decisions() {
 
   const setQuery = (value) => {
     const next = new URLSearchParams();
-    if (value) next.set('q', value);
+    if (value) next.set("q", value);
     setParams(next);
   };
 
   return (
-      <Page width="content">
-      <div className="flex items-start justify-between gap-4">
-        <label className="block w-[300px]">
+    <Page width="content">
+      <div className="flex flex-col gap-3 md:flex-row md:items-end md:justify-between">
+        <label className="block w-full md:max-w-sm">
           <span className="mb-2 block text-label text-ink">Search</span>
           <input
             type="search"
@@ -135,14 +145,11 @@ export default function Decisions() {
             className="h-12 w-full rounded-lg border border-line bg-surface px-3.5 text-body text-ink outline-none placeholder:text-muted focus:border-brand focus:ring-2 focus:ring-brand/15"
           />
         </label>
-        {/* Absent from the Mobile board entirely (not just resized) — hidden below md.
-            md:mt-6 aligns the button with the search input box itself: the "Search"
-            label above the input has no counterpart next to the button, so the
-            button needs the same 24px push to line up with the input's top edge. */}
+        {/* Hidden below md: the mobile board has no New decision action. */}
         <Button
           variant="primary"
-          onClick={() => navigate('/chats')}
-          className="hidden h-[42px] w-[160px] md:mt-6 md:inline-flex"
+          onClick={() => navigate("/chats")}
+          className="hidden h-12 md:inline-flex"
         >
           New decision
         </Button>
@@ -155,7 +162,10 @@ export default function Decisions() {
       )}
 
       {error && (
-        <p role="alert" className="mt-10 rounded-lg bg-error/10 p-4 text-body text-error">
+        <p
+          role="alert"
+          className="mt-10 rounded-lg bg-error/10 p-4 text-body text-error"
+        >
           {error}
         </p>
       )}
@@ -163,11 +173,11 @@ export default function Decisions() {
       {!isLoading && !error && decisions.length === 0 && (
         <div className="mt-10 rounded-xl border border-dashed border-line">
           <EmptyState
-            title={query ? 'No decisions match' : 'No decisions yet'}
+            title={query ? "No decisions match" : "No decisions yet"}
             description={
               query
                 ? `Nothing matches "${query}". Try a different term, or clear the search to see every decision.`
-                : 'Decisions promoted from room messages will appear here.'
+                : "Decisions promoted from room messages will appear here."
             }
           />
         </div>
@@ -180,6 +190,6 @@ export default function Decisions() {
           ))}
         </div>
       )}
-      </Page>
+    </Page>
   );
 }

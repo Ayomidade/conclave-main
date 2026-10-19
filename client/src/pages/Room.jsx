@@ -13,7 +13,6 @@ import Modal from '../components/ui/Modal';
 import Spinner from '../components/ui/Spinner';
 import Textarea from '../components/ui/Textarea';
 import { useAuth } from '../contexts/AuthContext';
-import { useChats } from '../contexts/ChatsContext';
 import { useRealtime } from '../contexts/RealtimeContext';
 import { useToast } from '../contexts/ToastContext';
 import useMessages from '../hooks/useMessages';
@@ -22,15 +21,8 @@ import useRoom from '../hooks/useRoom';
 /**
  * One conversation.
  *
- * Marking the room read lives here rather than on the list row's click
- * handler, because the click handler is not the only way in. The rail, a deep
- * link, the browser's back button and a future notification all land on this
- * component, and a badge that only clears when the pointer happens to be the
- * thing that navigated is a badge that is usually wrong.
- *
- * The optimistic zero in `markSeen` means the badge disappears the instant the
- * room opens, before the request completes — which is the behaviour you want,
- * and safe because the server's answer is not in doubt.
+ * Read state advances as timeline messages become visible, so opening a room
+ * does not clear messages the reader has not reached yet.
  *
  * Edit and delete are dialogs rather than inline: an edit that turns the row
  * into a second composer breaks the grouping around it, and a delete needs a
@@ -46,7 +38,6 @@ export default function Room() {
   const navigate = useNavigate();
   const { isConnected, socket } = useRealtime();
   const { setRoomHeader } = useOutletContext();
-  const { markSeen } = useChats();
   const { user } = useAuth();
   const viewerId = user?.id;
   const { toast } = useToast();
@@ -58,6 +49,7 @@ export default function Room() {
   const [promoting, setPromoting] = useState(null);
   const [flagging, setFlagging] = useState(null);
   const [creatingPoll, setCreatingPoll] = useState(false);
+  const [threadRoot, setThreadRoot] = useState(null);
 
   const scrollContainerRef = useRef(null);
 
@@ -80,7 +72,10 @@ export default function Room() {
     unpinMessage,
     typingUserIds,
     readPointers,
+    readSequences,
+    deliveredSequences,
     deliveryIds,
+    lastSeenSequence,
   } = useMessages(roomId, members);
 
   // Read ticks are derived from `last_seen_at`, so the members array has to be
@@ -92,13 +87,17 @@ export default function Room() {
       members.map((member) => ({
         ...member,
         last_seen_at: readPointers.get(member.id) || member.last_seen_at,
+        last_seen_sequence: readSequences.get(member.id) ?? member.last_seen_sequence,
+        last_delivered_sequence: deliveredSequences.get(member.id) ?? member.last_delivered_sequence,
       })),
-    [members, readPointers],
+    [members, readPointers, readSequences, deliveredSequences],
   );
 
-  useEffect(() => {
-    markSeen(roomId);
-  }, [roomId, markSeen]);
+  const handleMessageVisible = (message) => {
+    if (socket?.connected && message?.id && !String(message.id).startsWith('optimistic-')) {
+      socket.emit('message-read', { roomId, messageId: message.id });
+    }
+  };
 
   useEffect(() => {
     if (!room) return undefined;
@@ -237,11 +236,8 @@ export default function Room() {
           ref={scrollContainerRef}
           className="row-start-2 min-h-0 overflow-y-auto overscroll-contain [overflow-anchor:none]"
         >
-        {/* No in-room catch-up digest. markSeen below advances this room's
-            last_seen_at on open, and getRoomDigest filters against exactly that
-            pointer — so a digest fetched here would always be empty. Catch-up
-            belongs to the cross-room card and page, which read the pointer
-            without moving it. */}
+        {/* Catch-up belongs to the cross-room digest. Room read pointers move
+            as individual messages enter the viewport. */}
         {messagesLoading ? (
           <Spinner label="Loading messages" />
         ) : messagesError ? (
@@ -275,13 +271,19 @@ export default function Room() {
             onToggleReaction={handleToggleReaction}
             onPin={handlePin}
             onUnpin={handleUnpin}
+            lastSeenSequence={lastSeenSequence}
+            onMessageVisible={handleMessageVisible}
+            onOpenThread={setThreadRoot}
           />
         )}
       </div>
 
       <MessageComposer
         className="row-start-3"
-        disabled={!isConnected}
+        onEditLast={() => {
+          const last = [...messages].reverse().find((message) => message.sender_id === viewerId && !message.is_deleted && !message._optimistic);
+          if (last) { setEditing(last); setEditDraft(last.content || ''); }
+        }}
         onSend={sendMessage}
         onCreatePoll={() => setCreatingPoll(true)}
         onCreateDecision={() => setPromoting({ manual: true })}
@@ -291,6 +293,36 @@ export default function Room() {
         replyTo={replyTo}
         onCancelReply={() => setReplyTo(null)}
       />
+
+      {threadRoot && (
+        <aside role="complementary" aria-label="Message thread" className="fixed inset-x-0 bottom-16 top-16 z-40 flex flex-col border-l border-line bg-surface shadow-modal md:bottom-0 md:left-auto md:w-[min(400px,40vw)]">
+          <header className="flex items-center justify-between border-b border-line px-4 py-3">
+            <div>
+              <h2 className="text-h2 text-ink">Thread</h2>
+              <p className="text-metadata text-muted">{messages.filter((message) => message.reply_to_id === threadRoot.id).length} replies</p>
+            </div>
+            <button type="button" onClick={() => setThreadRoot(null)} aria-label="Close thread" className="rounded-lg px-3 py-2 text-label text-muted hover:bg-canvas">Close</button>
+          </header>
+          <div className="min-h-0 flex-1 overflow-y-auto p-4">
+            <article className="rounded-xl bg-canvas p-3">
+              <p className="text-metadata font-medium text-muted">{threadRoot.sender_name || 'Member'}</p>
+              <p className="mt-1 whitespace-pre-wrap break-words text-body text-ink">{threadRoot.content || 'Attachment'}</p>
+            </article>
+            <div className="my-4 border-t border-line" />
+            <div className="space-y-3">
+              {messages.filter((message) => message.reply_to_id === threadRoot.id).map((message) => (
+                <article key={message.id} className="rounded-xl border border-line p-3">
+                  <p className="text-metadata font-medium text-muted">{message.sender_name || 'Member'}</p>
+                  <p className="mt-1 whitespace-pre-wrap break-words text-body text-ink">{message.content || 'Attachment'}</p>
+                </article>
+              ))}
+            </div>
+          </div>
+          <div className="border-t border-line p-3">
+            <button type="button" onClick={() => { setReplyTo(threadRoot); setThreadRoot(null); }} className="w-full rounded-lg bg-brand px-4 py-2.5 text-label font-semibold text-surface">Reply in thread</button>
+          </div>
+        </aside>
+      )}
 
       <Modal
         open={Boolean(editing)}

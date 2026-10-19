@@ -1,6 +1,6 @@
 import { defineConfig } from '@playwright/test';
 
-const APP = 'http://localhost:5173';
+const APP = 'http://localhost:5175';
 const PUBLIC = 'http://localhost:5174';
 
 const mobile = {
@@ -53,14 +53,16 @@ export default defineConfig({
 
   webServer: [
     {
-      command: 'npm run dev',
+      command: 'npm run dev -- --port 5175',
       url: APP,
-      reuseExistingServer: true,
+      env: { ...process.env, VITE_DEV_AUTH_BYPASS: 'true' },
+      reuseExistingServer: false,
       timeout: 90_000,
     },
     {
       command: 'VITE_DEV_AUTH_BYPASS=false npm run dev -- --port 5174',
       url: PUBLIC,
+      env: { ...process.env, VITE_DEV_AUTH_BYPASS: 'false' },
       reuseExistingServer: true,
       timeout: 90_000,
     },

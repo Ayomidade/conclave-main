@@ -59,6 +59,7 @@ const EXPECTED_ROUTES = [
   ['DELETE', '/api/rooms/:roomId/members/:userId', true],
   ['PATCH', '/api/rooms/:roomId/members/:userId', true],
   ['POST', '/api/rooms/:roomId/seen', true],
+  ['PATCH', '/api/rooms/:roomId/preferences', true],
   // messages
   ['POST', '/api/messages', true],
   ['GET', '/api/messages/room/:roomId', true],
@@ -92,6 +93,7 @@ const EXPECTED_ROUTES = [
   ['POST', '/api/upload', true],
   // attachments — the delivery proxy, auth-guarded and membership-checked
   ['GET', '/api/attachments/:attachmentId', true],
+  ['GET', '/api/attachments/:attachmentId/url', true],
 ];
 
 // Express keeps a router's own paths relative to its mount point, so a route
@@ -278,6 +280,7 @@ test('every backend module loads without throwing', async () => {
     '../src/middlewares/auth.middleware',
     '../src/middlewares/error.middleware',
     '../src/middlewares/validateParams',
+    '../src/middlewares/rateLimit.middleware',
     '../src/utils/ApiError',
     '../src/utils/apiResponse',
     '../src/utils/asyncHandler',

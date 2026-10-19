@@ -1,5 +1,6 @@
-import { api } from '../lib/api';
-import { clearLocalFiles as clearFileStore, getFile, putFile } from '@/lib/fileCache';
+import { api } from "../lib/api";
+import { readLocalFile, saveLocalFile } from "../lib/fileCache";
+import { getMediaPreferences } from "../lib/mediaPreferences";
 
 /**
  * Fetching an attachment.
@@ -18,8 +19,6 @@ import { clearLocalFiles as clearFileStore, getFile, putFile } from '@/lib/fileC
  */
 
 // url -> Promise<Blob>. Keyed by URL for the same reason as fileCache.
-const memo = new Map();
-
 async function readError(error) {
   const data = error.response?.data;
   // With responseType "blob", a JSON error body arrives as a Blob.
@@ -33,98 +32,92 @@ async function readError(error) {
   return data?.message || null;
 }
 
-/** Accepts an attachment object, or a bare id for the oldest callers. */
-function normalise(attachment) {
-  if (typeof attachment === 'string' || typeof attachment === 'number') {
-    return { id: attachment, url: null };
+async function fetchFromServer(attachment, onProgress) {
+  try {
+    const response = await api.get(`/attachments/${attachment.id}`, {
+      responseType: "blob",
+      onDownloadProgress: (event) => {
+        const total = event.total || attachment.size;
+        if (total) onProgress?.(Math.min(1, event.loaded / total));
+      },
+    });
+    return response.data;
+  } catch (error) {
+    throw new Error((await readError(error)) || "Could not load this file.");
   }
-  return attachment || {};
 }
 
-function cacheKey(attachment) {
-  const { url, id } = attachment;
-  return url || (id ? `id:${id}` : null);
+function shouldCacheAttachment(attachment) {
+  const preferences = getMediaPreferences();
+  const type = attachment.mime_type || '';
+  if (type.startsWith('image/')) return preferences.images;
+  if (type.startsWith('video/')) return preferences.video;
+  return preferences.documents;
 }
 
-function dropMemo(key) {
-  if (key) memo.delete(key);
-}
+// One request per attachment at a time, however many components ask for it.
+const inflight = new Map();
 
 /**
- * @param {object|string} attachment
- * @param {{ cache?: boolean }} [options] - `cache: false` skips the reads but
- *   still writes, so a download leaves the file ready for the next open.
- * @returns {Promise<Blob>}
+ * The file's bytes, from this device when we have them, from the server
+ * otherwise. Whatever the server returns is kept for next time. The key is the
+ * attachment's `url`, which is unique per upload and identical for the sender
+ * (who stored it at upload time) and for everyone who receives it.
  */
-export function fetchAttachmentBlob(attachment, { cache = true } = {}) {
-  const record = normalise(attachment);
-  const key = cacheKey(record);
+export function getAttachmentBlob(attachment, { onProgress } = {}) {
+  const key = attachment.url || attachment.id;
+  const existing = inflight.get(key);
+  if (existing) {
+    if (onProgress) existing.listeners.add(onProgress);
+    return existing.promise;
+  }
 
-  if (!record.id) return Promise.reject(new Error('This file is still sending.'));
+  const listeners = new Set(onProgress ? [onProgress] : []);
+  const emit = (fraction) => listeners.forEach((listener) => listener(fraction));
 
-  if (key && memo.has(key)) return memo.get(key);
+  const promise = (async () => {
+    const local = await readLocalFile(attachment.url);
+    if (local) return local;
 
-  const pending = (async () => {
-    if (cache && key) {
-      const hit = await getFile(key);
-      if (hit) return hit;
+    const blob = await fetchFromServer(attachment, emit);
+    if (attachment.url && shouldCacheAttachment(attachment)) {
+      saveLocalFile(attachment.url, blob, {
+        filename: attachment.filename,
+        mime: attachment.mime_type,
+      });
     }
+    return blob;
+  })().finally(() => inflight.delete(key));
 
-    try {
-      const response = await api.get(`/attachments/${record.id}`, { responseType: 'blob' });
-      const blob = response.data;
-      // Not awaited: storing must never delay the thing it is stored for, and
-      // putFile cannot reject.
-      if (key) putFile(key, blob);
-      return blob;
-    } catch (error) {
-      dropMemo(key);
-      throw new Error((await readError(error)) || 'Could not load this file.');
-    }
-  })();
+  inflight.set(key, { promise, listeners });
+  return promise;
+}
 
-  if (key) memo.set(key, pending);
-  return pending;
+/** The copy already on this device, or null. Never touches the network. */
+export function getCachedAttachmentBlob(attachment) {
+  return readLocalFile(attachment.url);
+}
+
+export async function getAttachmentStreamUrl(attachment) {
+  const { data } = await api.get(`/attachments/${attachment.id}/url`);
+  return data.data;
 }
 
 /**
- * Store a file the user just uploaded, before any message row names it.
- *
- * The sender has bytes and a URL and nothing else — the message that will
- * reference it may not exist yet — which is exactly what the cache is keyed on.
- * Written at upload time rather than at render time because that is the only
- * moment both are in hand.
- *
- * @param {string} url
- * @param {Blob|File} blob
- * @returns {Promise<boolean>}
+ * Called by the composer right after a successful upload, before the message is
+ * sent. Awaited, so the copy is on disk before the server's echo comes back and
+ * the bubble finds it instead of downloading what we just uploaded.
  */
-export function rememberUploadedFile(url, blob) {
-  if (!url || !blob) return Promise.resolve(false);
-  const key = url;
-  memo.delete(key);
-  return putFile(key, blob);
-}
-
-/**
- * Empty both cache levels.
- *
- * `fileCache` handles what outlives the tab; the memo has to go too, or a
- * signed-out session would keep serving blobs from memory until a reload.
- *
- * @returns {Promise<void>}
- */
-export async function clearLocalFiles() {
-  memo.clear();
-  await clearFileStore();
+export function rememberUploadedFile(url, file) {
+  return saveLocalFile(url, file, { filename: file.name, mime: file.type });
 }
 
 export async function downloadAttachment(attachment) {
-  const blob = await fetchAttachmentBlob(attachment, { cache: false });
+  const blob = await getAttachmentBlob(attachment);
   const objectUrl = URL.createObjectURL(blob);
-  const link = document.createElement('a');
+  const link = document.createElement("a");
   link.href = objectUrl;
-  link.download = attachment.filename || 'download';
+  link.download = attachment.filename || "download";
   document.body.appendChild(link);
   link.click();
   link.remove();

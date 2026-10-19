@@ -5,16 +5,17 @@ import IconFailed from '@/assets/icons/failed.svg?react';
 import IconPending from '@/assets/icons/pending.svg?react';
 import IconRead from '@/assets/icons/read.svg?react';
 import IconSent from '@/assets/icons/sent.svg?react';
-import AttachmentCard from './AttachmentCard';
+import { AttachmentGroup } from './AttachmentCard';
 import MessageActions from './MessageActions';
 import MessageReactions from './MessageReactions';
 import PollCard from './PollCard';
-import { useState } from "react";
+import { useRef, useState } from "react";
 import useLongPress from "@/hooks/useLongPress";
 
 const TICKS = {
   pending: { Icon: IconPending, label: 'Sending' },
   sent: { Icon: IconSent, label: 'Sent' },
+  delivered: { Icon: IconRead, label: 'Delivered' },
   read: { Icon: IconRead, label: 'Read' },
   failed: { Icon: IconFailed, label: 'Failed to send' },
 };
@@ -86,10 +87,12 @@ export default function Message({
   onPin,
   onUnpin,
   onToggleReaction,
+  onOpenThread,
 }) {
   const { isOnlineIn } = usePresence();
   const mine = message.sender_id === viewerId;
   const [menuOpen, setMenuOpen] = useState(false);
+  const bodyRef = useRef(null);
   const longPress = useLongPress(() => setMenuOpen(true), { disabled: message.is_deleted });
 
   const status = mine
@@ -154,13 +157,18 @@ const bubbleClass = [
         {message.is_deleted ? (
           <div className={`${bubbleClass} text-muted`}>Message deleted</div>
         ) : (
-          message.content && (
-            // The poll carries its question as the message content, so the
-            // bubble exists either way — it just renders the poll instead of
-            // the text. Chat-list previews and search still read the question
-            // as ordinary content.
-            <div {...longPress}>
-              {message.poll ? (
+          // One body for everything that is the message itself: the bubble or
+          // poll, and its attachments. Long-press and the hover button both
+          // attach here, so a message that is only a photo has a menu too.
+          <div
+            ref={bodyRef}
+            {...longPress}
+            className={`relative flex min-w-0 max-w-full flex-col gap-1.5 ${
+              mine ? "items-end" : "items-start"
+            }`}
+          >
+            {message.content &&
+              (message.poll ? (
                 <PollCard
                   message={message}
                   viewerId={viewerId}
@@ -168,19 +176,41 @@ const bubbleClass = [
                 />
               ) : (
                 <div className={bubbleClass}>{renderContent(message.content)}</div>
-              )}
-            </div>
-          )
-        )}
+              ))}
 
-        {message.attachments?.length > 0 && !message.is_deleted && (
-          <div className="flex w-full flex-col gap-1.5">
-            {message.attachments.map((attachment) => (
-              <AttachmentCard
-                key={attachment.id || attachment.url}
-                attachment={attachment}
+            {message.attachments?.length > 0 && (
+              <AttachmentGroup attachments={message.attachments} />
+            )}
+
+            {/* Beside the body and out of the layout flow, so a row reserves no
+                indent. Hover devices reveal it on hover; touch devices hide it
+                and open the menu by long-press. */}
+            <div
+              className={`absolute top-1 transition-opacity ${
+                mine ? "right-full pr-1" : "left-full pl-1"
+              } ${
+                menuOpen ? "opacity-100" : "opacity-0"
+              } [@media(hover:none)]:hidden [@media(hover:hover)]:group-hover:opacity-100 [@media(hover:hover)]:focus-within:opacity-100`}
+            >
+              <MessageActions
+                message={message}
+                viewerId={viewerId}
+                isAdmin={isAdmin}
+                open={menuOpen}
+                onOpenChange={setMenuOpen}
+                anchorRef={bodyRef}
+                align={mine ? "end" : "start"}
+                onToggleReaction={(emoji) => onToggleReaction(message, emoji)}
+                onReply={() => onReply(message)}
+                onOpenThread={() => onOpenThread(message)}
+                onEdit={() => onEdit(message)}
+                onDelete={() => onDelete(message)}
+                onPromote={() => onPromote(message)}
+                onFlagTask={() => onFlagTask(message)}
+                onPin={onPin}
+                onUnpin={onUnpin}
               />
-            ))}
+            </div>
           </div>
         )}
 
@@ -188,9 +218,9 @@ const bubbleClass = [
           <span className="text-metadata text-muted">edited</span>
         )}
 
-        {/* Always rendered, not only when reactions exist: the picker lives
-            inside it, so a conditional here would mean a message with no
-            reactions yet could never receive its first one. */}
+        {/* Renders nothing until a reaction exists. The first one comes from the
+            actions menu, so this row only appears once there is something to
+            show or add to. */}
         {!message.is_deleted && (
           <MessageReactions
             message={message}
@@ -214,25 +244,6 @@ const bubbleClass = [
         )}
       </div>
 
-      <div
-        className={`shrink-0 transition-opacity ${menuOpen ? "opacity-100" : "opacity-0"} pointer-events-none [@media(hover:none)]:absolute [@media(hover:none)]:right-0 [@media(hover:none)]:top-0 [@media(hover:hover)]:pointer-events-auto [@media(hover:hover)]:group-hover:opacity-100 [@media(hover:hover)]:focus-within:opacity-100`}
-      >
-        <MessageActions
-          message={message}
-          viewerId={viewerId}
-          isAdmin={isAdmin}
-          open={menuOpen}
-          onOpenChange={setMenuOpen}
-          onToggleReaction={(emoji) => onToggleReaction(message, emoji)}
-          onReply={() => onReply(message)}
-          onEdit={() => onEdit(message)}
-          onDelete={() => onDelete(message)}
-          onPromote={() => onPromote(message)}
-          onFlagTask={() => onFlagTask(message)}
-          onPin={onPin}
-          onUnpin={onUnpin}
-        />
-      </div>
     </article>
   );
 }

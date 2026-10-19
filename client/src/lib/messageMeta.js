@@ -113,11 +113,14 @@ export function readStatus(message, members = [], viewerId, pendingIds = new Set
   if (failedIds.has(message.id)) return 'failed';
   if (pendingIds.has(message.id)) return 'pending';
 
-  const created = new Date(message.created_at).getTime();
   const others = members.filter((member) => member.id !== viewerId);
   const hasReader = others.some(
-    (member) => new Date(member.last_seen_at).getTime() >= created,
+    (member) => message.room_sequence != null && member.last_seen_sequence != null
+      ? Number(member.last_seen_sequence) >= Number(message.room_sequence)
+      : new Date(member.last_seen_at).getTime() >= new Date(message.created_at).getTime(),
   );
+
+  if (!hasReader && others.some((member) => Number(member.last_delivered_sequence || 0) >= Number(message.room_sequence || Infinity))) return 'delivered';
 
   return hasReader ? 'read' : 'sent';
 }

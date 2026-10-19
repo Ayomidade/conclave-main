@@ -5,6 +5,8 @@ import ThemeSwitch from '@/components/ui/ThemeSwitch';
 import { useToast } from '@/contexts/ToastContext';
 import { getPreferences, updatePreferences } from '@/services/users.service';
 import Page from '@/components/layout/Page';
+import { clearLocalFiles, localFileUsage } from '@/lib/fileCache';
+import { getMediaPreferences, saveMediaPreferences } from '@/lib/mediaPreferences';
 
 // The same three states the server constrains (migration 015). Mirrored here so
 // the control can be rendered from the list rather than hardcoded three times,
@@ -47,6 +49,8 @@ export default function Settings() {
   const [preferences, setPreferences] = useState(null);
   const [isLoading, setIsLoading] = useState(true);
   const [savingKey, setSavingKey] = useState(null);
+  const [mediaPreferences, setMediaPreferences] = useState(getMediaPreferences);
+  const [storageBytes, setStorageBytes] = useState(0);
 
   useEffect(() => {
     setRoomHeader('Settings');
@@ -63,6 +67,14 @@ export default function Settings() {
       active = false;
     };
   }, []);
+
+  useEffect(() => { localFileUsage().then(setStorageBytes); }, []);
+
+  async function clearDownloads() {
+    await clearLocalFiles();
+    setStorageBytes(0);
+    toast({ title: 'Downloaded media cleared', tone: 'success' });
+  }
 
   async function save(updates, key) {
     setSavingKey(key);
@@ -189,6 +201,29 @@ export default function Settings() {
             })}
           </ul>
         </fieldset>
+      </section>
+
+      <section className="mt-6 rounded-xl border border-line bg-surface p-6">
+        <h2 className="text-h2 text-ink">Storage and downloads</h2>
+        <p className="mt-2 text-body text-muted">Choose which media types are kept on this device after opening.</p>
+        <div className="mt-4 divide-y divide-line rounded-lg border border-line">
+          {[
+            ['images', 'Images'], ['video', 'Video'], ['documents', 'Documents'],
+          ].map(([key, label]) => (
+            <label key={key} className="flex cursor-pointer items-center justify-between gap-4 px-3 py-3 text-body text-ink">
+              {label}
+              <input type="checkbox" checked={Boolean(mediaPreferences[key])} onChange={(event) => {
+                const next = { ...mediaPreferences, [key]: event.target.checked };
+                setMediaPreferences(next);
+                saveMediaPreferences(next);
+              }} className="h-4 w-4 rounded border-line text-brand focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand/30" />
+            </label>
+          ))}
+        </div>
+        <div className="mt-5 flex flex-wrap items-center justify-between gap-3">
+          <p className="text-body text-muted">Downloaded media: {(storageBytes / (1024 * 1024)).toFixed(1)} MB</p>
+          <button type="button" onClick={clearDownloads} className="rounded-lg border border-line px-3 py-2 text-label font-medium text-ink hover:bg-canvas focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand/30">Clear downloaded media</button>
+        </div>
       </section>
       </Page>
   );

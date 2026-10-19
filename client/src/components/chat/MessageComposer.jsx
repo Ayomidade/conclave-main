@@ -2,9 +2,17 @@ import { useEffect, useRef, useState } from 'react';
 import IconClose from '@/assets/icons/close.svg?react';
 import IconMention from '@/assets/icons/mention.svg?react';
 import IconSend from '@/assets/icons/send.svg?react';
-import { uploadFile } from '@/services/messages.service';
-import { rememberUploadedFile } from '@/services/attachments.service';
-import { isAccepted, MAX_ATTACHMENTS, MAX_UPLOAD_BYTES } from '@/lib/media';
+import IconMic from '@/assets/icons/mic.svg?react';
+import { uploadFile } from "@/services/messages.service";
+import { rememberUploadedFile } from "@/services/attachments.service";
+import {
+  compressImage,
+  isAccepted,
+  isImage,
+  limitFor,
+  MAX_ATTACHMENTS,
+  normaliseFile,
+} from '@/lib/media';
 import AttachmentPicker from './AttachmentPicker';
 import AttachmentPreviewDialog from './AttachmentPreviewDialog';
 import MentionPicker from './MentionPicker';
@@ -55,6 +63,7 @@ export default function MessageComposer({
   onCreatePoll,
   onCreateDecision,
   onCreateTask,
+  onEditLast,
   // The room pane is a grid and addresses its rows explicitly, so the composer
   // needs to accept the placement the parent decides rather than hardcoding one.
   className = '',
@@ -63,14 +72,23 @@ export default function MessageComposer({
   const [error, setError] = useState('');
   const [pendingFiles, setPendingFiles] = useState([]);
   const [sending, setSending] = useState(false);
+  const [progress, setProgress] = useState(0);
   const [mentionQuery, setMentionQuery] = useState(null);
   const [mentionedIds, setMentionedIds] = useState([]);
+  const [recording, setRecording] = useState(false);
 
   const textareaRef = useRef(null);
   const typingTimer = useRef(null);
   // Bumped when the preview is abandoned so an upload still in flight knows its
   // result is no longer wanted and must not touch state that has moved on.
   const sendToken = useRef(0);
+  const abortRef = useRef(null);
+  const recorderRef = useRef(null);
+  const recordingStreamRef = useRef(null);
+  const recordingChunksRef = useRef([]);
+  // Photos picked through Photos or Camera are shrunk before upload. A WeakSet
+  // keeps that flag beside the File without changing the list the dialog gets.
+  const compressRef = useRef(new WeakSet());
 
   // Auto-grow. Reset to auto first so shrinking works, then clamp at five
   // lines — beyond that the box scrolls rather than eating the timeline.
@@ -85,6 +103,7 @@ export default function MessageComposer({
   useEffect(
     () => () => {
       if (typingTimer.current) clearTimeout(typingTimer.current);
+      recordingStreamRef.current?.getTracks().forEach((track) => track.stop());
     },
     [],
   );
@@ -166,16 +185,20 @@ export default function MessageComposer({
    *
    * @param {File[]} files
    */
-  const handleFiles = (files) => {
+  const handleFiles = (files, { compress = false } = {}) => {
     const rejected = [];
     const accepted = [];
 
-    for (const file of files) {
-      if (file.size > MAX_UPLOAD_BYTES) {
-        rejected.push(`"${file.name}" is larger than the 25MB limit.`);
+    for (const raw of files) {
+      const file = normaliseFile(raw);
+      const limit = limitFor(file);
+
+      if (file.size > limit) {
+        rejected.push(`"${file.name}" is larger than the ${limit / (1024 * 1024)}MB limit.`);
       } else if (!isAccepted(file.type, file.name)) {
         rejected.push(`"${file.name}" is not a file type this app can store.`);
       } else {
+        if (compress && isImage(file)) compressRef.current.add(file);
         accepted.push(file);
       }
     }
@@ -209,7 +232,10 @@ export default function MessageComposer({
   // from it, never moved out of it, so cancelling cannot lose text.
   const cancelPreview = () => {
     sendToken.current += 1;
+    abortRef.current?.abort();
+    abortRef.current = null;
     setSending(false);
+    setProgress(0);
     setPendingFiles([]);
     setError('');
   };
@@ -219,7 +245,7 @@ export default function MessageComposer({
    *
    * Sequential rather than parallel: an error has to name a file, and with
    * requests in flight at once the one that failed is not knowable. Ten files
-   * is the ceiling, and each is a single small request.
+   * is the ceiling, and each file is uploaded as its own request.
    *
    * On failure nothing is cleared. The preview stays open with the files, the
    * caption and the reason, so the retry costs one press and no typing — losing
@@ -232,20 +258,38 @@ export default function MessageComposer({
     if (sending || pendingFiles.length === 0) return;
 
     const token = ++sendToken.current;
+    const controller = new AbortController();
+    abortRef.current = controller;
     setSending(true);
+    setProgress(0);
     setError('');
+
+    // Progress is measured in bytes across the whole set, so one large video
+    // moves the bar in proportion to its size, not by one file in ten.
+    const totalBytes = pendingFiles.reduce((sum, file) => sum + file.size, 0) || 1;
+    let doneBytes = 0;
 
     let attachments;
     try {
       attachments = [];
       for (const file of pendingFiles) {
-        const stored = await uploadFile(file);
+        const prepared = compressRef.current.has(file) ? await compressImage(file) : file;
         if (sendToken.current !== token) return;
-        // Now, rather than when the message renders: at this instant the file
-        // has bytes and a URL and the message that will name it does not exist
-        // yet, and the URL is the cache key. This is the sender's half of the
-        // store — the receiver's half is the first open of the image.
-        await rememberUploadedFile(stored.url, file);
+
+        const stored = await uploadFile(prepared, {
+          signal: controller.signal,
+          onProgress: (fraction) => {
+            if (sendToken.current === token) {
+              setProgress((doneBytes + fraction * file.size) / totalBytes);
+            }
+          },
+        });
+        if (sendToken.current !== token) return;
+
+        // Keep what was actually uploaded on this device before the message
+        // goes out, so the bubble that comes back never downloads it again.
+        await rememberUploadedFile(stored.url, prepared);
+        doneBytes += file.size;
         attachments.push({ url: stored.url });
       }
     } catch (err) {
@@ -263,6 +307,8 @@ export default function MessageComposer({
         'Could not upload one of the files.';
       const sentence = reason.endsWith('.') ? reason : `${reason}.`;
       setSending(false);
+      setProgress(0);
+      abortRef.current = null;
       setError(`${sentence} Nothing was sent — the files and caption are still here.`);
       return;
     }
@@ -282,6 +328,8 @@ export default function MessageComposer({
     } catch (err) {
       if (sendToken.current !== token) return;
       setSending(false);
+      setProgress(0);
+      abortRef.current = null;
       setError(err?.message || 'Could not send this message.');
       return;
     }
@@ -289,6 +337,8 @@ export default function MessageComposer({
     if (sendToken.current !== token) return;
     setSending(false);
     setPendingFiles([]);
+    setProgress(0);
+    abortRef.current = null;
     reset();
   };
 
@@ -317,10 +367,52 @@ export default function MessageComposer({
     }
   };
 
+  const toggleVoiceRecording = async () => {
+    if (recording && recorderRef.current) {
+      const recorder = recorderRef.current;
+      recorder.onstop = () => {
+        const type = recorder.mimeType || 'audio/webm';
+        const file = new File(recordingChunksRef.current, `voice-note-${Date.now()}.webm`, { type });
+        recordingChunksRef.current = [];
+        setRecording(false);
+        if (file.size) setPendingFiles([file]);
+      };
+      recorder.stop();
+      recordingStreamRef.current?.getTracks().forEach((track) => track.stop());
+      recordingStreamRef.current = null;
+      return;
+    }
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      recordingStreamRef.current = stream;
+      recordingChunksRef.current = [];
+      const recorder = new MediaRecorder(stream);
+      recorderRef.current = recorder;
+      recorder.ondataavailable = (event) => { if (event.data.size) recordingChunksRef.current.push(event.data); };
+      recorder.start();
+      setRecording(true);
+    } catch {
+      recordingStreamRef.current?.getTracks().forEach((track) => track.stop());
+      recordingStreamRef.current = null;
+      setError('Microphone access is unavailable. Check your browser permission and try again.');
+    }
+  };
+
   const handleKeyDown = (event) => {
     // A composition is in flight (IME). Enter is committing a character, not
     // sending a message.
     if (event.nativeEvent?.isComposing || event.keyCode === 229) return;
+
+    if (event.key === 'Escape' && replyTo) {
+      event.preventDefault();
+      onCancelReply?.();
+      return;
+    }
+    if (event.key === 'ArrowUp' && !content && onEditLast) {
+      event.preventDefault();
+      onEditLast();
+      return;
+    }
 
     if (event.key === 'Enter' && !event.shiftKey) {
       event.preventDefault();
@@ -354,6 +446,11 @@ export default function MessageComposer({
 
       <div className="relative flex items-end gap-2 rounded-lg border border-line bg-surface px-3 py-2 focus-within:border-brand focus-within:ring-2 focus-within:ring-brand/10">
         <div className="flex shrink-0 gap-1 pb-1">
+          <button type="button" onClick={toggleVoiceRecording} disabled={disabled || sending || pendingFiles.length > 0}
+            aria-label={recording ? 'Stop voice note recording' : 'Record voice note'}
+            className={`grid h-8 w-8 place-items-center rounded-lg transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand/30 disabled:opacity-40 ${recording ? 'bg-error/10 text-error' : 'text-muted hover:bg-canvas hover:text-ink'}`}>
+            <IconMic className="h-5 w-5" aria-hidden="true" />
+          </button>
           <AttachmentPicker
             onFiles={handleFiles}
             disabled={disabled}
@@ -441,6 +538,7 @@ export default function MessageComposer({
         files={pendingFiles}
         initialCaption={content}
         sending={sending}
+        progress={progress}
         error={error}
         onSend={submitPreview}
         onCancel={cancelPreview}

@@ -21,7 +21,7 @@ const PAGE_SIZE = 50;
 // write through message.service.createMessage so history stays consistent.
 const sendMessage = asyncHandler(async (req, res) => {
   const { roomId } = req.body;
-  const { content, replyToId, attachments, mentionedUserIds } = req.body;
+  const { content, replyToId, attachments, mentionedUserIds, clientId } = req.body;
 
   if (!roomId) {
     throw new ApiError(400, "roomId is required");
@@ -30,6 +30,7 @@ const sendMessage = asyncHandler(async (req, res) => {
   const message = await createMessage({
     roomId,
     senderId: req.user.id,
+    clientId,
     content,
     replyToId,
     attachments,
@@ -46,7 +47,7 @@ const sendMessage = asyncHandler(async (req, res) => {
 // Returns newest-first, with the most recent PAGE_SIZE messages by default.
 const listMessages = asyncHandler(async (req, res) => {
   const { roomId } = req.params;
-  const { before } = req.query; // ISO timestamp cursor
+  const { before, afterSeq } = req.query;
 
   // 1. Verify the caller is a member of this room
   const membership = await query(
@@ -61,6 +62,8 @@ const listMessages = asyncHandler(async (req, res) => {
   let sql = `
     SELECT
       m.id,
+      m.client_id,
+      m.room_sequence,
       m.room_id,
       m.sender_id,
       u.display_name AS sender_name,
@@ -81,7 +84,10 @@ const listMessages = asyncHandler(async (req, res) => {
             'filename',  a.filename,
             'size',      a.size_bytes,
             'mime_type', a.file_type,
-            'url',       a.file_url
+            'url',       a.file_url,
+            'width',     a.width,
+            'height',    a.height,
+            'preview_url', a.preview_url
           )
         ) FILTER (WHERE a.id IS NOT NULL),
         '[]'
@@ -105,7 +111,12 @@ const listMessages = asyncHandler(async (req, res) => {
   `;
   const params = [roomId];
 
-  if (before) {
+  if (afterSeq !== undefined) {
+    const seq = Number(afterSeq);
+    if (!Number.isSafeInteger(seq) || seq < 0) throw new ApiError(400, 'afterSeq must be a non-negative integer');
+    params.push(seq);
+    sql += ` AND m.room_sequence > $${params.length}`;
+  } else if (before) {
     // Compound cursor "<created_at>|<id>". A bare created_at comparison skips
     // rows when two messages share a timestamp, because `created_at < cursor`
     // drops every row equal to the cursor — including the one we just returned
@@ -113,19 +124,31 @@ const listMessages = asyncHandler(async (req, res) => {
     // A cursor without the separator is still accepted for older clients.
     const sep = before.indexOf('|');
     if (sep === -1) {
+      if (/^\d+$/.test(before)) {
+        params.push(before);
+        sql += ` AND m.room_sequence < $${params.length}`;
+      } else {
       params.push(before);
       sql += ` AND m.created_at < $${params.length}`;
+      }
     } else {
-      params.push(before.slice(0, sep), before.slice(sep + 1));
-      sql += ` AND (m.created_at, m.id) < ($${params.length - 1}::timestamptz, $${params.length}::uuid)`;
+      const seq = before.slice(0, sep);
+      if (/^\d+$/.test(seq)) {
+        params.push(seq);
+        sql += ` AND m.room_sequence < $${params.length}`;
+      } else {
+        params.push(before.slice(0, sep), before.slice(sep + 1));
+        sql += ` AND (m.created_at, m.id) < ($${params.length - 1}::timestamptz, $${params.length}::uuid)`;
+      }
     }
   }
 
+  const ascending = afterSeq !== undefined;
   sql += `
     GROUP BY m.id, m.room_id, m.sender_id, u.display_name, u.avatar_url,
-             m.content, m.reply_to_id, m.edited_at, m.deleted_at, m.created_at
-    ORDER BY m.created_at DESC, m.id DESC LIMIT $${params.length + 1}`;
-  params.push(PAGE_SIZE);
+             m.client_id, m.room_sequence, m.content, m.reply_to_id, m.edited_at, m.deleted_at, m.created_at
+    ORDER BY m.room_sequence ${ascending ? 'ASC' : 'DESC'} LIMIT $${params.length + 1}`;
+  params.push(ascending ? 200 : PAGE_SIZE);
 
   const result = await query(sql, params);
 
@@ -147,7 +170,7 @@ const listMessages = asyncHandler(async (req, res) => {
   // ISO for the same reason.
   const nextCursor =
     messages.length === PAGE_SIZE && last
-      ? `${new Date(last.created_at).toISOString()}|${last.id}`
+      ? String(last.room_sequence)
       : null;
 
   return ok(res, { messages, nextCursor });
@@ -164,7 +187,7 @@ const listMessages = asyncHandler(async (req, res) => {
  */
 async function getMessagePayload(messageId, viewerId) {
   const result = await query(
-    `SELECT m.id, m.room_id, m.sender_id,
+    `SELECT m.id, m.room_id, m.sender_id, m.client_id, m.room_sequence,
             u.display_name AS sender_name,
             u.avatar_url   AS sender_avatar,
             CASE WHEN m.deleted_at IS NOT NULL THEN NULL ELSE m.content END AS content,
@@ -180,7 +203,10 @@ async function getMessagePayload(messageId, viewerId) {
                   'filename',  a.filename,
                   'size',      a.size_bytes,
                   'mime_type', a.file_type,
-                  'url',       a.file_url
+                  'url',       a.file_url,
+                  'width',     a.width,
+                  'height',    a.height,
+                  'preview_url', a.preview_url
                 )
               ) FILTER (WHERE a.id IS NOT NULL),
               '[]'
@@ -195,7 +221,7 @@ async function getMessagePayload(messageId, viewerId) {
      INNER JOIN users u ON u.id = m.sender_id
      LEFT JOIN attachments a ON a.message_id = m.id
      WHERE m.id = $1
-     GROUP BY m.id, m.room_id, m.sender_id, u.display_name, u.avatar_url,
+     GROUP BY m.id, m.room_id, m.sender_id, m.client_id, m.room_sequence, u.display_name, u.avatar_url,
               m.content, m.reply_to_id, m.edited_at, m.deleted_at, m.created_at`,
     [messageId],
   );
@@ -252,6 +278,8 @@ const searchMessages = asyncHandler(async (req, res) => {
        m.id,
        m.room_id,
        m.sender_id,
+       m.client_id,
+       m.room_sequence,
        u.display_name AS sender_name,
        u.avatar_url   AS sender_avatar,
        m.content,
@@ -267,7 +295,10 @@ const searchMessages = asyncHandler(async (req, res) => {
              'filename',  a.filename,
              'size',      a.size_bytes,
              'mime_type', a.file_type,
-             'url',       a.file_url
+             'url',       a.file_url,
+             'width',     a.width,
+             'height',    a.height,
+             'preview_url', a.preview_url
            )
          ) FILTER (WHERE a.id IS NOT NULL),
          '[]'
@@ -291,7 +322,7 @@ const searchMessages = asyncHandler(async (req, res) => {
      WHERE m.room_id = $1
        AND m.deleted_at IS NULL
        AND to_tsvector('english', m.content) @@ plainto_tsquery('english', $2)
-     GROUP BY m.id, m.room_id, m.sender_id, u.display_name, u.avatar_url,
+     GROUP BY m.id, m.room_id, m.sender_id, m.client_id, m.room_sequence, u.display_name, u.avatar_url,
               m.content, m.reply_to_id, m.edited_at, m.deleted_at, m.created_at
      ORDER BY rank DESC, m.created_at DESC
      LIMIT 50`,

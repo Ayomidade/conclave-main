@@ -57,6 +57,7 @@ export default function ChatFilters() {
     { value: 'unread', label: 'Unread' },
     { value: 'groups', label: 'Groups' },
     { value: 'dms', label: 'DMs' },
+    { value: 'archived', label: 'Archived' },
   ];
 
   return (
